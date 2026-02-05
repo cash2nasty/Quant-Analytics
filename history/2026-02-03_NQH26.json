@@ -1,0 +1,58 @@
+{
+  "date": "2026-02-03",
+  "symbol": "NQH26",
+  "sessions": {
+    "Asia": {
+      "name": "Asia",
+      "high": 25996.75,
+      "low": 25900.5,
+      "open": 25947.75,
+      "close": 25978.75,
+      "range": 96.25,
+      "volume": 25131.0
+    },
+    "London": {
+      "name": "London",
+      "high": 26024.0,
+      "low": 25923.5,
+      "open": 26012.0,
+      "close": 25983.25,
+      "range": 100.5,
+      "volume": 25841.0
+    },
+    "US": {
+      "name": "US",
+      "high": 25952.25,
+      "low": 25219.0,
+      "open": 25934.0,
+      "close": 25468.5,
+      "range": 733.25,
+      "volume": 584106.0
+    }
+  },
+  "patterns": {
+    "london_breakout": false,
+    "whipsaw": false,
+    "trend_day": false,
+    "volatility_expansion": true,
+    "notes": "US range expanded significantly vs London (Volatility Expansion)."
+  },
+  "bias": {
+    "daily_bias": "Bullish",
+    "daily_confidence": 0.5999999999999999,
+    "us_open_bias": "Bearish",
+    "us_open_confidence": 0.5999999999999999,
+    "explanation": "Daily Bias is Bullish based on previous day (Bullish), Asia (Bullish), and London (Bearish). US Open Bias is Bearish, with volatility regime 'compressed', momentum and ROC aligned at -0.000, RVOL at 0.68. News tone is neutral and only adjusts confidence, not direction.",
+    "vwap_comment": "Price is below both daily and weekly VWAP (strong bearish posture).",
+    "news_comment": "ForexFactory: neutral (No major high-impact events dominating today's tone.) | SeekingAlpha: neutral (Macro commentary is mixed; no strong risk-on/off consensus.). News tone adjusts bias confidence but does not override session structure."
+  },
+  "trade_suggestion": {
+    "action": "Don't Trade",
+    "rationale": "Daily Bias is Bullish but US Open Bias is Bearish, indicating conflict between sessions. When higher-timeframe and US session structure disagree, the safest choice is not to trade."
+  },
+  "accuracy": {
+    "actual_direction": "Bearish",
+    "bias_correct": false,
+    "explanation": "Daily Bias was Bullish, but the market closed Bearish. The bias did not match the actual outcome; review session structure, VWAP posture, and news context for this day."
+  }
+}

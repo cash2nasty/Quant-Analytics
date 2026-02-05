@@ -1,0 +1,40 @@
+{
+  "date": "2026-02-02",
+  "symbol": "NQH26",
+  "sessions": {
+    "US": {
+      "name": "US",
+      "high": 25949.5,
+      "low": 25821.75,
+      "open": 25929.0,
+      "close": 25854.0,
+      "range": 127.75,
+      "volume": 94802.0
+    }
+  },
+  "patterns": {
+    "london_breakout": false,
+    "whipsaw": false,
+    "trend_day": false,
+    "volatility_expansion": false,
+    "notes": "No major structural patterns detected."
+  },
+  "bias": {
+    "daily_bias": "Neutral",
+    "daily_confidence": 0.6999999999999998,
+    "us_open_bias": "Bearish",
+    "us_open_confidence": 0.6999999999999998,
+    "explanation": "Daily Bias is Neutral based on previous day (Neutral), Asia (Neutral), and London (Neutral). US Open Bias is Bearish, with volatility regime 'compressed', momentum and ROC aligned at 0.000, RVOL at 0.54. News tone is neutral and only adjusts confidence, not direction.",
+    "vwap_comment": "Price is above both daily and weekly VWAP (strong bullish posture).",
+    "news_comment": "ForexFactory: neutral (No major high-impact events dominating today's tone.) | SeekingAlpha: neutral (Macro commentary is mixed; no strong risk-on/off consensus.). News tone adjusts bias confidence but does not override session structure."
+  },
+  "trade_suggestion": {
+    "action": "Don't Trade",
+    "rationale": "Bias is Neutral or conflicting; structure does not provide a clear edge. Stand aside until a clearer directional picture emerges."
+  },
+  "accuracy": {
+    "actual_direction": "Bullish",
+    "bias_correct": false,
+    "explanation": "Daily Bias was Neutral, but the market closed Bullish. The bias did not match the actual outcome; review session structure, VWAP posture, and news context for this day."
+  }
+}
