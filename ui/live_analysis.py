@@ -156,6 +156,18 @@ def get_prev_trading_day(date: dt.date) -> dt.date:
     return prev_date
 
 
+def compute_trading_day_extremes(df: pd.DataFrame, trading_date: dt.date):
+    if df is None or df.empty:
+        return (None, None, None, None)
+    start = dt.datetime.combine(trading_date - dt.timedelta(days=1), dt.time(18, 0))
+    end = dt.datetime.combine(trading_date, dt.time(17, 0))
+    mask = (df["timestamp"] >= start) & (df["timestamp"] <= end)
+    sdf = df.loc[mask]
+    if sdf.empty:
+        return (None, None, start, end)
+    return (float(sdf["high"].max()), float(sdf["low"].min()), start, end)
+
+
 def build_preview_bias(df_prev: pd.DataFrame, sessions, zone_confluence=None) -> BiasSummary:
     prev_label = "Neutral"
     if df_prev is not None and not df_prev.empty:
@@ -262,6 +274,9 @@ def main():
         return
 
     # Ensure timestamp column exists and is datetime
+    day_high = None
+    day_low = None
+
     if has_today_data:
         if "timestamp" in df_today.columns:
             df_today["timestamp"] = pd.to_datetime(df_today["timestamp"])
@@ -580,6 +595,23 @@ def main():
         st.write(f"London broke Asia low: {format_break(ll)}")
 
     if has_today_data:
+        day_high, day_low, day_start, day_end = compute_trading_day_extremes(
+            df_sessions_source, effective_date
+        )
+        cutoff = dt.datetime.combine(effective_date, dt.time(17, 0))
+        st.markdown("### Daily High/Low (End-of-Day)")
+        if now >= cutoff or effective_date < today:
+            if day_high is not None and day_low is not None:
+                st.write(f"High: {day_high:.2f}")
+                st.write(f"Low: {day_low:.2f}")
+                if day_start and day_end:
+                    st.caption(f"Window: {day_start:%Y-%m-%d %H:%M} to {day_end:%Y-%m-%d %H:%M} (ET)")
+            else:
+                st.info("Not enough data to compute the trading-day high/low yet.")
+        else:
+            st.info("Trading day in progress — daily high/low will finalize at 17:00 ET.")
+
+    if has_today_data:
         # VWAP / moving averages
         st.markdown("### VWAP and Moving Averages")
         dvwap = compute_daily_vwap(df_today)
@@ -820,6 +852,8 @@ def main():
                 bias=bias,
                 trade_suggestion=suggestion,
                 accuracy=acc,
+                day_high=day_high if has_today_data else None,
+                day_low=day_low if has_today_data else None,
             )
             save_day_summary(day_summary)
             st.success("Saved current day summary to history.")
@@ -847,6 +881,8 @@ def main():
                         bias=bias,
                         trade_suggestion=suggestion,
                         accuracy=acc,
+                        day_high=day_high if has_today_data else None,
+                        day_low=day_low if has_today_data else None,
                     )
                     save_day_summary(day_summary)
                     st.success("Trading day archived to history automatically.")

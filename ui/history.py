@@ -16,6 +16,18 @@ def _get_prev_day_df(df, date: dt.date):
     return df.loc[mask].copy()
 
 
+def compute_trading_day_extremes(df: pd.DataFrame, trading_date: dt.date):
+    if df is None or df.empty:
+        return (None, None, None, None)
+    start = dt.datetime.combine(trading_date - dt.timedelta(days=1), dt.time(18, 0))
+    end = dt.datetime.combine(trading_date, dt.time(17, 0))
+    mask = (df["timestamp"] >= start) & (df["timestamp"] <= end)
+    sdf = df.loc[mask]
+    if sdf.empty:
+        return (None, None, start, end)
+    return (float(sdf["high"].max()), float(sdf["low"].min()), start, end)
+
+
 def render_history():
     st.header("History")
 
@@ -79,6 +91,9 @@ def render_history():
         s.bias = bias
         s.trade_suggestion = suggestion
         s.accuracy = accuracy
+        day_high, day_low, _, _ = compute_trading_day_extremes(df_sessions_source, selected_date)
+        s.day_high = day_high
+        s.day_low = day_low
 
         st.subheader(f"Computed Summary for {s.date} ({s.symbol})")
         if used_ticker:
@@ -88,6 +103,7 @@ def render_history():
             if accuracy is None:
                 st.warning("Accuracy is only available after the trading day ends.")
             else:
+                day_high, day_low, _, _ = compute_trading_day_extremes(df_sessions_source, selected_date)
                 day_summary = DaySummary(
                     date=str(selected_date),
                     symbol=symbol,
@@ -96,6 +112,8 @@ def render_history():
                     bias=bias,
                     trade_suggestion=suggestion,
                     accuracy=accuracy,
+                    day_high=day_high,
+                    day_low=day_low,
                 )
                 save_day_summary(day_summary)
                 st.success("Saved day summary to history.")
@@ -133,6 +151,13 @@ def render_history():
     if hasattr(b, "news_comment"):
         st.write(f"News Comment: {b.news_comment}")
     st.info(b.explanation)
+
+    st.markdown("### Daily High/Low (End-of-Day)")
+    if getattr(s, "day_high", None) is not None and getattr(s, "day_low", None) is not None:
+        st.write(f"High: {s.day_high:.2f}")
+        st.write(f"Low: {s.day_low:.2f}")
+    elif isinstance(s, DaySummary):
+        st.info("Daily high/low not stored for this day.")
 
     st.markdown("### Trade Suggestion")
     t = s.trade_suggestion

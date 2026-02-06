@@ -1,7 +1,7 @@
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 HISTORY_DIR = Path("history")
 HISTORY_DIR.mkdir(exist_ok=True)
@@ -62,6 +62,8 @@ class DaySummary:
     bias: BiasSummary
     trade_suggestion: TradeSuggestion
     accuracy: AccuracySummary
+    day_high: Optional[float] = None
+    day_low: Optional[float] = None
 
 
 def save_day_summary(summary: DaySummary) -> None:
@@ -74,6 +76,8 @@ def save_day_summary(summary: DaySummary) -> None:
         "bias": asdict(summary.bias),
         "trade_suggestion": asdict(summary.trade_suggestion),
         "accuracy": asdict(summary.accuracy),
+        "day_high": summary.day_high,
+        "day_low": summary.day_low,
     }
     with open(path, "w") as f:
         json.dump(serializable, f, indent=2)
@@ -105,6 +109,8 @@ def load_all_summaries() -> List[DaySummary]:
                 bias=bias,
                 trade_suggestion=trade_suggestion,
                 accuracy=accuracy,
+                day_high=data.get("day_high"),
+                day_low=data.get("day_low"),
             )
         )
     summaries.sort(key=lambda x: x.date)
