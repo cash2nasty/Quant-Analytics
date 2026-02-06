@@ -11,19 +11,19 @@ def atr_like(df: pd.DataFrame, length: int = 14) -> pd.Series:
     return ranges.rolling(length).mean()
 
 
-def classify_volatility(vol_series: pd.Series) -> str:
+def classify_volatility(vol_series: pd.Series, p_low: float = 0.30, p_high: float = 0.70) -> str:
     """
     Simple volatility regime classifier:
-    - High volatility: above 70th percentile
-    - Low volatility: below 30th percentile
+    - High volatility: above p_high percentile
+    - Low volatility: below p_low percentile
     - Normal otherwise
     """
     if len(vol_series) < 20:
         return "normal"
 
     recent = vol_series.iloc[-1]
-    p30 = vol_series.quantile(0.30)
-    p70 = vol_series.quantile(0.70)
+    p30 = vol_series.quantile(p_low)
+    p70 = vol_series.quantile(p_high)
 
     if recent > p70:
         return "expanded"

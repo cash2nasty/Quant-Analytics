@@ -57,7 +57,9 @@ def render_history():
             )
         sessions = compute_session_stats(df_sessions_source, selected_date)
         patterns = detect_patterns(sessions)
-        bias = build_bias(df_day, df_prev, sessions)
+        p_low = float(st.session_state.get("vol_p_low", 0.30))
+        p_high = float(st.session_state.get("vol_p_high", 0.70))
+        bias = build_bias(df_day, df_prev, sessions, vol_thresholds=(p_low, p_high))
         suggestion = build_trade_suggestion(bias)
         # Only compute accuracy for fully completed historical days
         if selected_date < today:

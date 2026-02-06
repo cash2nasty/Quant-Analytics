@@ -1,4 +1,5 @@
 import pandas as pd
+from typing import Optional
 
 from storage.history_manager import AccuracySummary, BiasSummary
 
@@ -16,10 +17,18 @@ def _actual_direction(df_today: pd.DataFrame) -> str:
     return "Neutral"
 
 
-def evaluate_bias_accuracy(df_today: pd.DataFrame, bias: BiasSummary) -> AccuracySummary:
+def evaluate_bias_accuracy(df_today: pd.DataFrame, bias: Optional[BiasSummary]) -> AccuracySummary:
     """
     Compares the Daily Bias to the actual full-day direction.
     """
+    if bias is None:
+        return AccuracySummary(
+            actual_direction=_actual_direction(df_today),
+            bias_correct=False,
+            explanation="Bias data was unavailable, so accuracy could not be evaluated.",
+            used_bias="n/a",
+            us_open_bias_correct=False,
+        )
     actual = _actual_direction(df_today)
     us_open_correct = actual == bias.us_open_bias
     use_us_open = bias.daily_bias == "Neutral" and bias.us_open_bias in ("Bullish", "Bearish")

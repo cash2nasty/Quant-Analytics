@@ -1,0 +1,60 @@
+{
+  "date": "2026-02-05",
+  "symbol": "NQH26",
+  "sessions": {
+    "Asia": {
+      "name": "Asia",
+      "high": 25169.0,
+      "low": 24915.75,
+      "open": 25067.5,
+      "close": 25008.25,
+      "range": 253.25,
+      "volume": 46855.0
+    },
+    "London": {
+      "name": "London",
+      "high": 25123.75,
+      "low": 24707.5,
+      "open": 25043.75,
+      "close": 24779.75,
+      "range": 416.25,
+      "volume": 68182.0
+    },
+    "US": {
+      "name": "US",
+      "high": 24960.75,
+      "low": 24543.25,
+      "open": 24770.25,
+      "close": 24571.5,
+      "range": 417.5,
+      "volume": 556750.0
+    }
+  },
+  "patterns": {
+    "london_breakout": false,
+    "whipsaw": false,
+    "trend_day": true,
+    "volatility_expansion": false,
+    "notes": "London and US aligned directionally with strong ranges (Trend Day)."
+  },
+  "bias": {
+    "daily_bias": "Bearish",
+    "daily_confidence": 0.95,
+    "us_open_bias": "Bearish",
+    "us_open_confidence": 0.95,
+    "explanation": "Daily Bias is Bearish based on previous day (Bearish), Asia (Bearish), and London (Bearish). US Open Bias is Bearish, with volatility regime 'normal', momentum and ROC aligned at -0.004, RVOL at 0.43. News tone is neutral and only adjusts confidence, not direction.",
+    "vwap_comment": "Price is below both daily and weekly VWAP (strong bearish posture).",
+    "news_comment": "ForexFactory: neutral (No major high-impact events dominating today's tone.) | SeekingAlpha: neutral (Macro commentary is mixed; no strong risk-on/off consensus.). News tone adjusts bias confidence but does not override session structure."
+  },
+  "trade_suggestion": {
+    "action": "Trade",
+    "rationale": "Daily Bias and US Open Bias are both Bearish with high confidence (0.95). Sessions, VWAP posture, and supporting indicators align\u2014this is a day to trade in the direction of the bias."
+  },
+  "accuracy": {
+    "actual_direction": "Bearish",
+    "bias_correct": true,
+    "explanation": "Daily Bias was Bearish and the market closed Bearish. The bias correctly anticipated the full-day direction.",
+    "used_bias": "Daily",
+    "us_open_bias_correct": true
+  }
+}

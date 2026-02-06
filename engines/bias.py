@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
@@ -10,6 +10,7 @@ from indicators.volume import rvol
 from indicators.trend import classify_trend
 from data.news_fetcher import combine_news_signals
 from storage.history_manager import SessionStats, BiasSummary
+from engines.zones import ZoneConfluence
 
 
 @dataclass
@@ -61,6 +62,8 @@ def build_bias(
     df_today: pd.DataFrame,
     df_prev: pd.DataFrame,
     sessions: Dict[str, SessionStats],
+    zone_confluence: Optional[ZoneConfluence] = None,
+    vol_thresholds: Optional[Tuple[float, float]] = None,
 ) -> BiasSummary:
     """
     Implements the final bias priority order:
@@ -108,7 +111,10 @@ def build_bias(
 
     # 7. Volatility regime
     vol_series = rolling_volatility(df_today["close"], length=20)
-    vol_regime = classify_volatility(vol_series)
+    if vol_thresholds:
+        vol_regime = classify_volatility(vol_series, p_low=vol_thresholds[0], p_high=vol_thresholds[1])
+    else:
+        vol_regime = classify_volatility(vol_series)
 
     # 8. Momentum
     roc_series = roc(df_today["close"], length=10)
@@ -179,6 +185,20 @@ def build_bias(
         f"momentum and ROC aligned at {last_roc:.3f}, RVOL at {last_rvol:.2f}. "
         f"News tone is {news_signal.tone} and only adjusts confidence, not direction."
     )
+
+    if zone_confluence is not None and zone_confluence.bias != "Neutral":
+        score = abs(zone_confluence.score)
+        bias_boost = min(0.15, 0.04 * score)
+        daily_conf += bias_boost
+        if score >= 2 and daily_bias != zone_confluence.bias:
+            daily_bias = zone_confluence.bias
+        explanation += (
+            f" HTF zones suggest {zone_confluence.bias} bias "
+            f"(score {zone_confluence.score:.2f}; {zone_confluence.notes})."
+        )
+
+    daily_conf = max(0.1, min(0.95, daily_conf))
+    us_conf = daily_conf
 
     return BiasSummary(
         daily_bias=daily_bias,
