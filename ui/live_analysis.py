@@ -3,6 +3,11 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+
 from data.data_fetcher import fetch_intraday_ohlcv
 from data.session_reference import get_session_windows_for_date
 from engines.sessions import compute_session_stats
@@ -156,6 +161,27 @@ def get_prev_trading_day(date: dt.date) -> dt.date:
     return prev_date
 
 
+def _now_et() -> dt.datetime:
+    if ZoneInfo is None:
+        return dt.datetime.now()
+    return dt.datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+
+
+def trading_day_window(trading_date: dt.date) -> tuple:
+    start = dt.datetime.combine(trading_date - dt.timedelta(days=1), dt.time(18, 0))
+    end = dt.datetime.combine(trading_date, dt.time(17, 0))
+    return start, end
+
+
+def trading_date_for_timestamp(ts: dt.datetime) -> dt.date:
+    date = ts.date()
+    if ts >= dt.datetime.combine(date, dt.time(18, 0)):
+        date = date + dt.timedelta(days=1)
+    while date.weekday() >= 5:
+        date += dt.timedelta(days=1)
+    return date
+
+
 def compute_trading_day_extremes(df: pd.DataFrame, trading_date: dt.date):
     if df is None or df.empty:
         return (None, None, None, None)
@@ -209,6 +235,10 @@ def build_preview_bias(df_prev: pd.DataFrame, sessions, zone_confluence=None) ->
         daily_confidence=daily_conf,
         us_open_bias="Neutral",
         us_open_confidence=daily_conf,
+        us_open_bias_30="Neutral",
+        us_open_confidence_30=daily_conf,
+        us_open_bias_60="Neutral",
+        us_open_confidence_60=daily_conf,
         explanation=explanation,
         vwap_comment="VWAP posture will update once intraday data is available.",
         news_comment="News signal will update with the live feed.",
@@ -218,8 +248,8 @@ def build_preview_bias(df_prev: pd.DataFrame, sessions, zone_confluence=None) ->
 def main():
     st.title("Live Analysis")
 
-    today = dt.date.today()
-    now = dt.datetime.now()
+    now = _now_et()
+    today = trading_date_for_timestamp(now)
     symbol = st.sidebar.text_input("Symbol", value="NQH26")
     selected_date = st.sidebar.date_input("Analysis date", value=today)
     auto_advance = st.sidebar.checkbox(
@@ -241,8 +271,8 @@ def main():
         and selected_windows
         and "US" in selected_windows
     ):
-        us_end = selected_windows["US"].get("end")
-        if us_end and now > us_end + dt.timedelta(hours=1):
+        _, trading_end = trading_day_window(selected_date)
+        if trading_end and now > trading_end + dt.timedelta(hours=1):
             effective_date = get_next_trading_day(selected_date)
             auto_advanced = True
 
@@ -388,6 +418,22 @@ def main():
     # Session Stats
     st.markdown("### Session Stats")
     cols = st.columns(3)
+    if windows and has_today_data and df_sessions_source is not None:
+        missing_sessions = []
+        for name in ["Asia", "London", "US"]:
+            win = windows.get(name)
+            if not win:
+                continue
+            count = df_sessions_source[
+                (df_sessions_source["timestamp"] >= win["start"])
+                & (df_sessions_source["timestamp"] <= win["end"])
+            ].shape[0]
+            if count == 0:
+                missing_sessions.append(name)
+        if missing_sessions:
+            st.caption(
+                f"Data feed is missing bars for: {', '.join(missing_sessions)} session(s) on this date."
+            )
     for i, name in enumerate(["Asia", "London", "US"]):
         with cols[i]:
             win = windows.get(name)
@@ -542,8 +588,18 @@ def main():
     else:
         bias = build_preview_bias(df_prev, sessions, zone_confluence=zone_confluence)
     st.markdown("### Bias")
-    st.write(f"Daily Bias: {getattr(bias,'daily_bias', 'n/a')} ({getattr(bias,'daily_confidence', 0):.2f})")
-    st.write(f"US Open Bias: {getattr(bias,'us_open_bias', 'n/a')} ({getattr(bias,'us_open_confidence', 0):.2f})")
+    st.write(f"Daily Bias: {getattr(bias,'daily_bias', 'n/a')} ({getattr(bias,'daily_confidence', 0):.0%})")
+    us_30 = getattr(bias, "us_open_bias_30", None) or getattr(bias, "us_open_bias", "n/a")
+    us_60 = getattr(bias, "us_open_bias_60", None) or getattr(bias, "us_open_bias", "n/a")
+    us_30_conf = getattr(bias, "us_open_confidence_30", None)
+    us_60_conf = getattr(bias, "us_open_confidence_60", None)
+    if us_30_conf is None:
+        us_30_conf = getattr(bias, "us_open_confidence", 0)
+    if us_60_conf is None:
+        us_60_conf = getattr(bias, "us_open_confidence", 0)
+    st.write(f"US Open Bias 30m: {us_30} ({us_30_conf:.0%})")
+    st.write(f"US Open Bias 60m: {us_60} ({us_60_conf:.0%})")
+    st.caption("Finalized at 09:10 ET using overnight range, gap, VWAP, and premarket trend.")
     st.write(f"VWAP Posture: {getattr(bias,'vwap_comment', '')}")
     st.write(f"News Effect: {getattr(bias,'news_comment', '')}")
     if getattr(bias, "explanation", None):
@@ -598,7 +654,7 @@ def main():
         day_high, day_low, day_start, day_end = compute_trading_day_extremes(
             df_sessions_source, effective_date
         )
-        cutoff = dt.datetime.combine(effective_date, dt.time(17, 0))
+        _, cutoff = trading_day_window(effective_date)
         st.markdown("### Daily High/Low (End-of-Day)")
         if now >= cutoff or effective_date < today:
             if day_high is not None and day_low is not None:
@@ -827,13 +883,16 @@ def main():
         else:
             bias = build_preview_bias(df_prev, sessions, zone_confluence=zone_confluence)
 
-    if effective_date < today and has_today_data:
+    _, trading_end = trading_day_window(effective_date)
+    is_trading_day_done = now >= trading_end
+    if (effective_date < today or (effective_date == today and is_trading_day_done)) and has_today_data:
         accuracy = evaluate_bias_accuracy(df_today, bias)
         st.markdown("### Daily Bias Accuracy (End-of-Day)")
         st.write(f"Actual Direction: {getattr(accuracy,'actual_direction', 'n/a')}")
         st.write(f"Bias Correct: {getattr(accuracy,'bias_correct', 'n/a')}")
         st.write(f"Used Bias: {getattr(accuracy,'used_bias', 'n/a')}")
-        st.write(f"US Open Bias Correct: {getattr(accuracy,'us_open_bias_correct', 'n/a')}")
+        st.write(f"US Open Bias Correct (30m): {getattr(accuracy,'us_open_bias_correct_30', 'n/a')}")
+        st.write(f"US Open Bias Correct (60m): {getattr(accuracy,'us_open_bias_correct_60', 'n/a')}")
         if getattr(accuracy, "explanation", None):
             st.info(accuracy.explanation)
     else:

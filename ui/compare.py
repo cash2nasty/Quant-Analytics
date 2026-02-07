@@ -31,8 +31,17 @@ def render_compare():
     with c1:
         st.subheader(f"{left.date} ({left.symbol})")
         st.markdown("**Bias**")
-        st.write(f"Daily: {left.bias.daily_bias} ({left.bias.daily_confidence:.2f})")
-        st.write(f"US: {left.bias.us_open_bias} ({left.bias.us_open_confidence:.2f})")
+        st.write(f"Daily: {left.bias.daily_bias} ({left.bias.daily_confidence:.0%})")
+        us30_left = getattr(left.bias, "us_open_bias_30", None) or left.bias.us_open_bias
+        us60_left = getattr(left.bias, "us_open_bias_60", None) or left.bias.us_open_bias
+        us30_left_conf = getattr(left.bias, "us_open_confidence_30", None)
+        us60_left_conf = getattr(left.bias, "us_open_confidence_60", None)
+        if us30_left_conf is None:
+            us30_left_conf = left.bias.us_open_confidence
+        if us60_left_conf is None:
+            us60_left_conf = left.bias.us_open_confidence
+        st.write(f"US 30m: {us30_left} ({us30_left_conf:.0%})")
+        st.write(f"US 60m: {us60_left} ({us60_left_conf:.0%})")
         st.markdown("**Patterns**")
         st.write(f"London Breakout: {left.patterns.london_breakout}")
         st.write(f"Whipsaw: {left.patterns.whipsaw}")
@@ -42,13 +51,23 @@ def render_compare():
         st.write(f"Actual: {left.accuracy.actual_direction}")
         st.write(f"Correct: {left.accuracy.bias_correct}")
         st.write(f"Used Bias: {getattr(left.accuracy,'used_bias', 'n/a')}")
-        st.write(f"US Open Correct: {getattr(left.accuracy,'us_open_bias_correct', 'n/a')}")
+        st.write(f"US Open Correct 30m: {getattr(left.accuracy,'us_open_bias_correct_30', 'n/a')}")
+        st.write(f"US Open Correct 60m: {getattr(left.accuracy,'us_open_bias_correct_60', 'n/a')}")
 
     with c2:
         st.subheader(f"{right.date} ({right.symbol})")
         st.markdown("**Bias**")
-        st.write(f"Daily: {right.bias.daily_bias} ({right.bias.daily_confidence:.2f})")
-        st.write(f"US: {right.bias.us_open_bias} ({right.bias.us_open_confidence:.2f})")
+        st.write(f"Daily: {right.bias.daily_bias} ({right.bias.daily_confidence:.0%})")
+        us30_right = getattr(right.bias, "us_open_bias_30", None) or right.bias.us_open_bias
+        us60_right = getattr(right.bias, "us_open_bias_60", None) or right.bias.us_open_bias
+        us30_right_conf = getattr(right.bias, "us_open_confidence_30", None)
+        us60_right_conf = getattr(right.bias, "us_open_confidence_60", None)
+        if us30_right_conf is None:
+            us30_right_conf = right.bias.us_open_confidence
+        if us60_right_conf is None:
+            us60_right_conf = right.bias.us_open_confidence
+        st.write(f"US 30m: {us30_right} ({us30_right_conf:.0%})")
+        st.write(f"US 60m: {us60_right} ({us60_right_conf:.0%})")
         st.markdown("**Patterns**")
         st.write(f"London Breakout: {right.patterns.london_breakout}")
         st.write(f"Whipsaw: {right.patterns.whipsaw}")
@@ -58,4 +77,5 @@ def render_compare():
         st.write(f"Actual: {right.accuracy.actual_direction}")
         st.write(f"Correct: {right.accuracy.bias_correct}")
         st.write(f"Used Bias: {getattr(right.accuracy,'used_bias', 'n/a')}")
-        st.write(f"US Open Correct: {getattr(right.accuracy,'us_open_bias_correct', 'n/a')}")
+        st.write(f"US Open Correct 30m: {getattr(right.accuracy,'us_open_bias_correct_30', 'n/a')}")
+        st.write(f"US Open Correct 60m: {getattr(right.accuracy,'us_open_bias_correct_60', 'n/a')}")

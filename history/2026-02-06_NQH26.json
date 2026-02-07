@@ -1,0 +1,62 @@
+{
+  "date": "2026-02-06",
+  "symbol": "NQH26",
+  "sessions": {
+    "Asia": {
+      "name": "Asia",
+      "high": 24610.25,
+      "low": 24239.75,
+      "open": 24334.75,
+      "close": 24593.0,
+      "range": 370.5,
+      "volume": 61019.0
+    },
+    "London": {
+      "name": "London",
+      "high": 24873.25,
+      "low": 24490.75,
+      "open": 24556.75,
+      "close": 24770.5,
+      "range": 382.5,
+      "volume": 64688.0
+    },
+    "US": {
+      "name": "US",
+      "high": 25222.0,
+      "low": 24719.5,
+      "open": 24760.5,
+      "close": 25139.5,
+      "range": 502.5,
+      "volume": 446473.0
+    }
+  },
+  "patterns": {
+    "london_breakout": false,
+    "whipsaw": false,
+    "trend_day": true,
+    "volatility_expansion": false,
+    "notes": "London and US aligned directionally with strong ranges (Trend Day)."
+  },
+  "bias": {
+    "daily_bias": "Bearish",
+    "daily_confidence": 0.6759999999999999,
+    "us_open_bias": "Bullish",
+    "us_open_confidence": 0.6759999999999999,
+    "explanation": "Daily Bias is Bearish based on previous day (Bearish), Asia (Bullish), and London (Bullish) with weighted by session range. US Open Bias is Bullish. Overnight range position is Inside. Gap is small down. HTF slope bias is n/a. Volatility regime is 'normal', momentum and ROC aligned at -0.002, RVOL at 0.26. News tone is neutral and only adjusts confidence, not direction. Day impact: Session weighting favors larger-range sessions over quieter ones. ATR-scaled thresholds reduce false bias on quiet days. US open inside overnight range favors mean reversion early. HTF zones suggest Bullish bias (score 1.90; Bullish zones: 4, Bearish zones: 3.).",
+    "vwap_comment": "Price is above both daily and weekly VWAP (strong bullish posture).",
+    "news_comment": "ForexFactory: neutral (No major high-impact events dominating today's tone.) | SeekingAlpha: neutral (Macro commentary is mixed; no strong risk-on/off consensus.). News tone adjusts bias confidence but does not override session structure."
+  },
+  "trade_suggestion": {
+    "action": "Don't Trade",
+    "rationale": "Daily Bias is Bearish but US Open Bias is Bullish, indicating conflict between sessions. When higher-timeframe and US session structure disagree, the safest choice is not to trade."
+  },
+  "accuracy": {
+    "actual_direction": "Bullish",
+    "bias_correct": false,
+    "explanation": "Daily Bias was Bearish, but the market closed Bullish. The bias did not match the actual outcome; review session structure, VWAP posture, and news context for this day.",
+    "used_bias": "Daily",
+    "us_open_bias_correct": true
+  },
+  "day_high": 25222.0,
+  "day_low": 24239.75
+}

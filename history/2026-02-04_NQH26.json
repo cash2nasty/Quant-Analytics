@@ -1,0 +1,62 @@
+{
+  "date": "2026-02-04",
+  "symbol": "NQH26",
+  "sessions": {
+    "Asia": {
+      "name": "Asia",
+      "high": 25473.75,
+      "low": 25375.75,
+      "open": 25427.75,
+      "close": 25450.25,
+      "range": 98.0,
+      "volume": 26281.0
+    },
+    "London": {
+      "name": "London",
+      "high": 25509.5,
+      "low": 25354.5,
+      "open": 25502.25,
+      "close": 25390.75,
+      "range": 155.0,
+      "volume": 40479.0
+    },
+    "US": {
+      "name": "US",
+      "high": 25390.0,
+      "low": 24783.5,
+      "open": 25385.5,
+      "close": 24912.0,
+      "range": 606.5,
+      "volume": 597331.0
+    }
+  },
+  "patterns": {
+    "london_breakout": true,
+    "whipsaw": false,
+    "trend_day": true,
+    "volatility_expansion": true,
+    "notes": "London extended beyond Asia range (London Breakout). London and US aligned directionally with strong ranges (Trend Day). US range expanded significantly vs London (Volatility Expansion)."
+  },
+  "bias": {
+    "daily_bias": "Bearish",
+    "daily_confidence": 0.8999999999999999,
+    "us_open_bias": "Bearish",
+    "us_open_confidence": 0.8999999999999999,
+    "explanation": "Daily Bias is Bearish based on previous day (Bearish), Asia (Bullish), and London (Bearish) with weighted by session range. US Open Bias is Bearish. Overnight range position is Inside. Gap is small down. HTF slope bias is Bearish. Volatility regime is 'normal', momentum and ROC aligned at 0.002, RVOL at 0.34. News tone is neutral and only adjusts confidence, not direction. Day impact: Session weighting favors larger-range sessions over quieter ones. ATR-scaled thresholds reduce false bias on quiet days. US open inside overnight range favors mean reversion early. HTF slope alignment supports follow-through; conflict adds chop risk.",
+    "vwap_comment": "Price is below both daily and weekly VWAP (strong bearish posture).",
+    "news_comment": "ForexFactory: neutral (No major high-impact events dominating today's tone.) | SeekingAlpha: neutral (Macro commentary is mixed; no strong risk-on/off consensus.). News tone adjusts bias confidence but does not override session structure."
+  },
+  "trade_suggestion": {
+    "action": "Trade",
+    "rationale": "Daily Bias and US Open Bias are both Bearish with high confidence (0.90). Sessions, VWAP posture, and supporting indicators align\u2014this is a day to trade in the direction of the bias."
+  },
+  "accuracy": {
+    "actual_direction": "Bearish",
+    "bias_correct": true,
+    "explanation": "Daily Bias was Bearish and the market closed Bearish. The bias correctly anticipated the full-day direction.",
+    "used_bias": "Daily",
+    "us_open_bias_correct": true
+  },
+  "day_high": 25514.25,
+  "day_low": 24783.5
+}

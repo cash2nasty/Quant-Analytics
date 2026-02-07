@@ -36,6 +36,10 @@ class BiasSummary:
     explanation: str
     vwap_comment: str
     news_comment: str
+    us_open_bias_30: Optional[str] = None
+    us_open_confidence_30: Optional[float] = None
+    us_open_bias_60: Optional[str] = None
+    us_open_confidence_60: Optional[float] = None
 
 
 @dataclass
@@ -51,6 +55,8 @@ class AccuracySummary:
     explanation: str
     used_bias: str
     us_open_bias_correct: bool
+    us_open_bias_correct_30: Optional[bool] = None
+    us_open_bias_correct_60: Optional[bool] = None
 
 
 @dataclass
@@ -99,6 +105,8 @@ def load_all_summaries() -> List[DaySummary]:
             explanation=acc_data.get("explanation", ""),
             used_bias=acc_data.get("used_bias", "Daily"),
             us_open_bias_correct=acc_data.get("us_open_bias_correct", False),
+            us_open_bias_correct_30=acc_data.get("us_open_bias_correct_30"),
+            us_open_bias_correct_60=acc_data.get("us_open_bias_correct_60"),
         )
         summaries.append(
             DaySummary(

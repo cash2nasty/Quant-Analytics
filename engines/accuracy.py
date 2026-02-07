@@ -17,6 +17,25 @@ def _actual_direction(df_today: pd.DataFrame) -> str:
     return "Neutral"
 
 
+def _actual_direction_window(df_today: pd.DataFrame, minutes: int) -> str:
+    if df_today.empty or "timestamp" not in df_today.columns:
+        return "Neutral"
+    date = df_today["timestamp"].iloc[0].date()
+    start = pd.Timestamp.combine(date, pd.Timestamp("09:30").time())
+    end = start + pd.Timedelta(minutes=minutes)
+    window = df_today[(df_today["timestamp"] >= start) & (df_today["timestamp"] <= end)]
+    if window.empty:
+        return "Neutral"
+    open_ = window["open"].iloc[0]
+    close = window["close"].iloc[-1]
+    diff = close - open_
+    if diff > 0:
+        return "Bullish"
+    if diff < 0:
+        return "Bearish"
+    return "Neutral"
+
+
 def evaluate_bias_accuracy(df_today: pd.DataFrame, bias: Optional[BiasSummary]) -> AccuracySummary:
     """
     Compares the Daily Bias to the actual full-day direction.
@@ -28,9 +47,23 @@ def evaluate_bias_accuracy(df_today: pd.DataFrame, bias: Optional[BiasSummary]) 
             explanation="Bias data was unavailable, so accuracy could not be evaluated.",
             used_bias="n/a",
             us_open_bias_correct=False,
+            us_open_bias_correct_30=None,
+            us_open_bias_correct_60=None,
         )
     actual = _actual_direction(df_today)
     us_open_correct = actual == bias.us_open_bias
+    us_open_actual_30 = _actual_direction_window(df_today, minutes=30)
+    us_open_actual_60 = _actual_direction_window(df_today, minutes=60)
+    us_open_bias_30 = getattr(bias, "us_open_bias_30", None)
+    us_open_bias_60 = getattr(bias, "us_open_bias_60", None)
+    if us_open_bias_30 in ("Bullish", "Bearish"):
+        us_open_correct_30 = us_open_actual_30 == us_open_bias_30
+    else:
+        us_open_correct_30 = None
+    if us_open_bias_60 in ("Bullish", "Bearish"):
+        us_open_correct_60 = us_open_actual_60 == us_open_bias_60
+    else:
+        us_open_correct_60 = None
     use_us_open = bias.daily_bias == "Neutral" and bias.us_open_bias in ("Bullish", "Bearish")
     used_bias = "US Open (fallback)" if use_us_open else "Daily"
     correct = actual == (bias.us_open_bias if use_us_open else bias.daily_bias)
@@ -64,4 +97,6 @@ def evaluate_bias_accuracy(df_today: pd.DataFrame, bias: Optional[BiasSummary]) 
         explanation=explanation,
         used_bias=used_bias,
         us_open_bias_correct=us_open_correct,
+        us_open_bias_correct_30=us_open_correct_30,
+        us_open_bias_correct_60=us_open_correct_60,
     )

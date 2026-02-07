@@ -7,7 +7,7 @@ def build_trade_suggestion(bias: BiasSummary) -> TradeSuggestion:
     Daily Bias, US Open Bias, and confidence.
     """
     daily = bias.daily_bias
-    us = bias.us_open_bias
+    us = getattr(bias, "us_open_bias_60", None) or bias.us_open_bias
     conf = bias.daily_confidence
 
     if daily == "Neutral" or us == "Neutral":

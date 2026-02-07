@@ -6,6 +6,7 @@ from engines.sessions import compute_session_stats
 from engines.patterns import detect_patterns
 from engines.bias import build_bias
 from engines.accuracy import evaluate_bias_accuracy
+from engines.zones import build_htf_zones, summarize_zone_confluence
 from engines.trade_suggestions import build_trade_suggestion
 from storage.history_manager import DaySummary, load_all_summaries, save_day_summary
 
@@ -28,6 +29,16 @@ def compute_trading_day_extremes(df: pd.DataFrame, trading_date: dt.date):
     return (float(sdf["high"].max()), float(sdf["low"].min()), start, end)
 
 
+def trading_days_between(start_date: dt.date, end_date: dt.date):
+    days = []
+    current = start_date
+    while current <= end_date:
+        if current.weekday() < 5:
+            days.append(current)
+        current += dt.timedelta(days=1)
+    return days
+
+
 def render_history():
     st.header("History")
 
@@ -37,6 +48,183 @@ def render_history():
 
     # First try to load saved summary if it exists
     summaries = load_all_summaries()
+    symbol_summaries = [s for s in summaries if s.symbol == symbol]
+    if symbol_summaries:
+        earliest = min(dt.date.fromisoformat(s.date) for s in symbol_summaries)
+        latest = max(dt.date.fromisoformat(s.date) for s in symbol_summaries)
+        st.markdown("### Backtest Summary")
+        st.caption("Summary can use saved days or recompute from raw data.")
+        st.caption("Recompute uses raw data even if the day was never saved.")
+        c_start, c_end = st.columns(2)
+        with c_start:
+            start_date = st.date_input("Start date", value=earliest)
+        with c_end:
+            end_date = st.date_input("End date", value=latest)
+        use_recompute = st.checkbox("Recompute from raw data", value=True)
+        if start_date > end_date:
+            st.warning("Start date must be on or before end date.")
+        else:
+            trading_days = trading_days_between(start_date, end_date)
+            in_range = [
+                s for s in symbol_summaries
+                if start_date <= dt.date.fromisoformat(s.date) <= end_date
+            ]
+            saved_days = {dt.date.fromisoformat(s.date) for s in in_range}
+            missing_saved_days = [d for d in trading_days if d not in saved_days]
+
+            scored = []
+            used_ticker = ""
+            missing_data_days = []
+            if use_recompute:
+                today = dt.datetime.now().date()
+                days_needed = max(1, (today - start_date).days + 1)
+                df, used_ticker = fetch_intraday_ohlcv(symbol, lookback_days=days_needed + 1)
+                if df is None or df.empty:
+                    st.warning("No data available to recompute this range.")
+                else:
+                    if "timestamp" in df.columns:
+                        df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    p_low = float(st.session_state.get("vol_p_low", 0.30))
+                    p_high = float(st.session_state.get("vol_p_high", 0.70))
+                    for day in trading_days:
+                        df_day = filter_date(df, day)
+                        if df_day.empty:
+                            missing_data_days.append(day)
+                            continue
+                        df_prev = _get_prev_day_df(df, day)
+                        df_sessions_source = df_day
+                        if df_prev is not None and not df_prev.empty:
+                            df_sessions_source = (
+                                pd.concat([df_prev, df_day], ignore_index=True)
+                                .sort_values("timestamp")
+                                .reset_index(drop=True)
+                            )
+                        sessions = compute_session_stats(df_sessions_source, day)
+                        zone_confluence = None
+                        if df_sessions_source is not None and not df_sessions_source.empty:
+                            htf_zones = build_htf_zones(df_sessions_source)
+                            last_price = float(df_day["close"].iloc[-1]) if not df_day.empty else None
+                            zone_confluence = summarize_zone_confluence(htf_zones, last_price)
+                        bias = build_bias(
+                            df_day,
+                            df_prev,
+                            sessions,
+                            zone_confluence=zone_confluence,
+                            vol_thresholds=(p_low, p_high),
+                        )
+                        accuracy = evaluate_bias_accuracy(df_day, bias)
+                        scored.append({"date": day, "accuracy": accuracy, "bias": bias})
+            else:
+                scored = [
+                    {"date": dt.date.fromisoformat(s.date), "accuracy": s.accuracy, "bias": s.bias}
+                    for s in in_range
+                    if s.accuracy and s.accuracy.actual_direction != "n/a"
+                ]
+
+            acc_list = [item["accuracy"] for item in scored]
+            excluded_daily = [
+                item["date"]
+                for item in scored
+                if item["accuracy"].actual_direction in (None, "n/a")
+            ]
+            excluded_30 = []
+            excluded_60 = []
+            for item in scored:
+                acc = item["accuracy"]
+                bias = item["bias"]
+                if acc.us_open_bias_correct_30 is None:
+                    reason = "Neutral bias"
+                    if getattr(bias, "us_open_bias_30", "Neutral") not in ("Bullish", "Bearish"):
+                        reason = "Neutral bias"
+                    excluded_30.append((item["date"], reason))
+                if acc.us_open_bias_correct_60 is None:
+                    reason = "Neutral bias"
+                    if getattr(bias, "us_open_bias_60", "Neutral") not in ("Bullish", "Bearish"):
+                        reason = "Neutral bias"
+                    excluded_60.append((item["date"], reason))
+            daily_total = len(acc_list)
+            daily_correct = sum(1 for a in acc_list if a.bias_correct)
+            us30_total = sum(1 for a in acc_list if a.us_open_bias_correct_30 is not None)
+            us30_correct = sum(1 for a in acc_list if a.us_open_bias_correct_30)
+            us60_total = sum(1 for a in acc_list if a.us_open_bias_correct_60 is not None)
+            us60_correct = sum(1 for a in acc_list if a.us_open_bias_correct_60)
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if daily_total:
+                    st.metric("Daily Bias Accuracy", f"{daily_correct / daily_total:.0%}")
+                    st.caption(f"{daily_correct} / {daily_total} days")
+                else:
+                    st.metric("Daily Bias Accuracy", "n/a")
+            with c2:
+                if us30_total:
+                    st.metric("US Open 30m Accuracy", f"{us30_correct / us30_total:.0%}")
+                    st.caption(f"{us30_correct} / {us30_total} days")
+                else:
+                    st.metric("US Open 30m Accuracy", "n/a")
+            with c3:
+                if us60_total:
+                    st.metric("US Open 60m Accuracy", f"{us60_correct / us60_total:.0%}")
+                    st.caption(f"{us60_correct} / {us60_total} days")
+                else:
+                    st.metric("US Open 60m Accuracy", "n/a")
+            st.caption("US Open accuracy uses direction over the first 30/60 minutes after 09:30 ET.")
+
+            c4, c5 = st.columns(2)
+            with c4:
+                st.metric("Days in Range", f"{len(trading_days)}")
+            with c5:
+                st.metric("Scored Days", f"{daily_total}")
+                if use_recompute:
+                    st.metric("Computed Days", f"{daily_total} / {len(trading_days)}")
+                    if missing_data_days:
+                        missing_preview = ", ".join(d.isoformat() for d in missing_data_days[:5])
+                        st.caption(f"Missing data days: {missing_preview}")
+                    if used_ticker:
+                        st.caption(f"Data source ticker: {used_ticker}")
+                else:
+                    st.metric("Saved Days", f"{len(in_range)} / {len(trading_days)}")
+                    if missing_saved_days:
+                        missing_preview = ", ".join(d.isoformat() for d in missing_saved_days[:5])
+                        st.caption(f"Missing saved days: {missing_preview}")
+
+            wrong_rows = []
+            for item in scored:
+                acc = item["accuracy"]
+                day = item["date"]
+                flags = []
+                if acc.bias_correct is False:
+                    flags.append("Daily")
+                if acc.us_open_bias_correct_30 is False:
+                    flags.append("US Open 30m")
+                if acc.us_open_bias_correct_60 is False:
+                    flags.append("US Open 60m")
+                if flags:
+                    wrong_rows.append({"Date": day.isoformat(), "Wrong": ", ".join(flags)})
+
+            if wrong_rows:
+                st.subheader("Wrong Days")
+                st.dataframe(pd.DataFrame(wrong_rows), use_container_width=True)
+
+            if excluded_daily or excluded_30 or excluded_60:
+                st.subheader("Excluded Days")
+                excluded_rows = []
+                for day in excluded_daily:
+                    excluded_rows.append({"Date": day.isoformat(), "Excluded From": "Daily", "Reason": "No actual direction"})
+                for day, reason in excluded_30:
+                    excluded_rows.append({"Date": day.isoformat(), "Excluded From": "US Open 30m", "Reason": reason})
+                for day, reason in excluded_60:
+                    excluded_rows.append({"Date": day.isoformat(), "Excluded From": "US Open 60m", "Reason": reason})
+                if excluded_rows:
+                    st.dataframe(pd.DataFrame(excluded_rows), use_container_width=True)
+
+            if use_recompute and missing_data_days:
+                st.subheader("Missing Feed Data")
+                st.caption("These dates have no bars for one or more sessions in the data feed.")
+                missing_rows = [{"Date": d.isoformat()} for d in missing_data_days]
+                st.dataframe(pd.DataFrame(missing_rows), use_container_width=True)
+    else:
+        st.info("No saved history for this symbol yet.")
     key = f"{selected_date.isoformat()} | {symbol}"
     saved = None
     for s in summaries:
@@ -143,8 +331,18 @@ def render_history():
 
     st.markdown("### Bias")
     b = s.bias
-    st.write(f"Daily Bias: {b.daily_bias} ({b.daily_confidence:.2f})")
-    st.write(f"US Open Bias: {b.us_open_bias} ({b.us_open_confidence:.2f})")
+    st.write(f"Daily Bias: {b.daily_bias} ({b.daily_confidence:.0%})")
+    us30 = getattr(b, "us_open_bias_30", None) or b.us_open_bias
+    us60 = getattr(b, "us_open_bias_60", None) or b.us_open_bias
+    us30_conf = getattr(b, "us_open_confidence_30", None)
+    us60_conf = getattr(b, "us_open_confidence_60", None)
+    if us30_conf is None:
+        us30_conf = b.us_open_confidence
+    if us60_conf is None:
+        us60_conf = b.us_open_confidence
+    st.write(f"US Open Bias 30m: {us30} ({us30_conf:.0%})")
+    st.write(f"US Open Bias 60m: {us60} ({us60_conf:.0%})")
+    st.caption("Finalized at 09:10 ET using overnight range, gap, VWAP, and premarket trend.")
     # vwap_comment/news_comment may not exist for older saved objects; guard
     if hasattr(b, "vwap_comment"):
         st.write(f"VWAP Comment: {b.vwap_comment}")
@@ -170,7 +368,8 @@ def render_history():
         st.write(f"Actual Direction: {a.actual_direction}")
         st.write(f"Bias Correct: {a.bias_correct}")
         st.write(f"Used Bias: {getattr(a,'used_bias', 'n/a')}")
-        st.write(f"US Open Bias Correct: {getattr(a,'us_open_bias_correct', 'n/a')}")
+        st.write(f"US Open Bias Correct (30m): {getattr(a,'us_open_bias_correct_30', 'n/a')}")
+        st.write(f"US Open Bias Correct (60m): {getattr(a,'us_open_bias_correct_60', 'n/a')}")
         st.info(a.explanation)
     else:
         st.info("Trading day in progress — accuracy will be available after the day ends.")
