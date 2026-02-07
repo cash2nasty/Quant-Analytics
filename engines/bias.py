@@ -11,6 +11,7 @@ from indicators.volatility import rolling_volatility, classify_volatility, atr_l
 from indicators.momentum import roc, trend_strength
 from indicators.volume import rvol
 from indicators.trend import classify_trend
+from indicators.statistics import zscore
 from data.news_fetcher import combine_news_signals
 from data.event_calendar import load_event_calendar
 from engines.patterns import detect_patterns
@@ -36,13 +37,29 @@ def analyze_vwap_posture(df_today: pd.DataFrame) -> VWAPPosture:
     weekly_above = last_price > last_wvwap if pd.notna(last_wvwap) else False
 
     if daily_above and weekly_above:
-        comment = "Price is above both daily and weekly VWAP (strong bullish posture)."
+        comment = (
+            "Price is above both daily and weekly VWAP (strong bullish posture). "
+            "Suggestion: watch for a retracement to daily/weekly VWAP and look for a hold; "
+            "if price opens and holds above, favor bullish continuation and a push through the next VWAP line."
+        )
     elif not daily_above and not weekly_above:
-        comment = "Price is below both daily and weekly VWAP (strong bearish posture)."
+        comment = (
+            "Price is below both daily and weekly VWAP (strong bearish posture). "
+            "Suggestion: watch for a retracement up to daily/weekly VWAP and look for rejection; "
+            "if price opens and holds below, favor bearish continuation and a push down through the next VWAP line."
+        )
     elif daily_above and not weekly_above:
-        comment = "Price is above daily but below weekly VWAP (short-term strength, long-term weakness)."
+        comment = (
+            "Price is above daily but below weekly VWAP (short-term strength, long-term weakness). "
+            "Suggestion: look for a pullback to daily VWAP and a reclaim for upside continuation, "
+            "but expect weekly VWAP to act as a ceiling until price can reclaim it."
+        )
     else:
-        comment = "Price is below daily but above weekly VWAP (short-term weakness, long-term strength)."
+        comment = (
+            "Price is below daily but above weekly VWAP (short-term weakness, long-term strength). "
+            "Suggestion: look for a pullback to daily VWAP and a rejection for downside continuation, "
+            "but expect weekly VWAP to act as a floor unless price breaks below it."
+        )
 
     return VWAPPosture(
         daily_above=daily_above,
@@ -124,6 +141,8 @@ def _premarket_signal(
     df_today: pd.DataFrame,
     amd_bias: str,
     pattern_bias: str,
+    htf_bias: str = "Neutral",
+    zone_confluence: Optional[ZoneConfluence] = None,
 ) -> Tuple[str, Dict[str, str], float]:
     if df_today is None or df_today.empty or "timestamp" not in df_today.columns:
         return "Neutral", {}, 0
@@ -153,9 +172,66 @@ def _premarket_signal(
     # VWAP posture
     vwap = compute_daily_vwap(pm)
     vwap_bias = "Neutral"
+    open_vwap_bias = "Neutral"
     if len(vwap):
         last_vwap = float(vwap.iloc[-1])
         vwap_bias = "Bullish" if pm_close > last_vwap else "Bearish" if pm_close < last_vwap else "Neutral"
+        open_vwap_bias = "Bullish" if pm_open > last_vwap else "Bearish" if pm_open < last_vwap else "Neutral"
+
+    # Moving averages (premarket)
+    sma20 = pm["close"].rolling(20).mean()
+    sma50 = pm["close"].rolling(50).mean()
+    last_sma20 = float(sma20.iloc[-1]) if len(sma20) and pd.notna(sma20.iloc[-1]) else None
+    last_sma50 = float(sma50.iloc[-1]) if len(sma50) and pd.notna(sma50.iloc[-1]) else None
+    sma20_bias = "Neutral"
+    sma50_bias = "Neutral"
+    if last_sma20 is not None:
+        sma20_bias = "Bullish" if pm_close > last_sma20 else "Bearish" if pm_close < last_sma20 else "Neutral"
+    if last_sma50 is not None:
+        sma50_bias = "Bullish" if pm_close > last_sma50 else "Bearish" if pm_close < last_sma50 else "Neutral"
+
+    # Momentum (premarket)
+    roc_series = roc(pm["close"], length=10) if len(pm) >= 10 else pd.Series(dtype=float)
+    mom_strength = trend_strength(pm["close"], length=20) if len(pm) >= 20 else 0.0
+    last_roc = float(roc_series.iloc[-1]) if len(roc_series) else 0.0
+    roc_mom_bias = "Neutral"
+    if last_roc > 0 and mom_strength > 0:
+        roc_mom_bias = "Bullish"
+    elif last_roc < 0 and mom_strength < 0:
+        roc_mom_bias = "Bearish"
+
+    # Volatility regime (premarket)
+    vol_series = rolling_volatility(pm["close"], length=20) if len(pm) >= 20 else pd.Series(dtype=float)
+    vol_regime = classify_volatility(vol_series) if len(vol_series) else "mixed"
+    vol_bias = pm_dir if vol_regime == "expanded" and pm_dir in ("Bullish", "Bearish") else "Neutral"
+
+    # RVOL (premarket)
+    rvol_series = rvol(pm, length=20) if len(pm) >= 20 else pd.Series(dtype=float)
+    last_rvol = float(rvol_series.iloc[-1]) if len(rvol_series) else 1.0
+    rvol_bias = pm_dir if last_rvol > 1.2 and pm_dir in ("Bullish", "Bearish") else "Neutral"
+
+    # Z-score (premarket)
+    z_series = zscore(pm["close"], length=20) if len(pm) >= 20 else pd.Series(dtype=float)
+    last_z = float(z_series.iloc[-1]) if len(z_series) else 0.0
+    zscore_bias = "Bullish" if last_z > 0.5 else "Bearish" if last_z < -0.5 else "Neutral"
+
+    # Standard deviation (premarket)
+    std_series = pm["close"].rolling(20).std()
+    last_std = float(std_series.iloc[-1]) if len(std_series) and pd.notna(std_series.iloc[-1]) else None
+    std_mean = float(std_series.dropna().mean()) if len(std_series.dropna()) else None
+    std_bias = "Neutral"
+    if last_std is not None and std_mean is not None and last_std > std_mean:
+        std_bias = pm_dir if pm_dir in ("Bullish", "Bearish") else "Neutral"
+
+    # HTF slope (from broader data)
+    htf_slope_bias = htf_bias if htf_bias in ("Bullish", "Bearish") else "Neutral"
+
+    # HTF zones (order blocks / breaker blocks / FVGs)
+    zone_bias = "Neutral"
+    zone_weight = 0.0
+    if zone_confluence is not None and zone_confluence.bias in ("Bullish", "Bearish"):
+        zone_bias = zone_confluence.bias
+        zone_weight = min(0.15, 0.04 * abs(zone_confluence.score))
 
     # Overnight range position
     overnight_bias = "Neutral"
@@ -169,6 +245,16 @@ def _premarket_signal(
         "premarket_trend": 0.30,
         "overnight": 0.25,
         "vwap": 0.15,
+        "open_vwap": 0.05,
+        "sma20": 0.05,
+        "sma50": 0.05,
+        "roc_mom": 0.05,
+        "vol": 0.05,
+        "rvol": 0.05,
+        "zscore": 0.05,
+        "std": 0.05,
+        "htf": 0.05,
+        "zone": zone_weight,
         "gap": 0.10,
         "amd_sweep": 0.20,
         "pattern_bias": 0.10,
@@ -177,11 +263,23 @@ def _premarket_signal(
         (pm_dir, "premarket_trend"),
         (gap_dir, "gap"),
         (vwap_bias, "vwap"),
+        (open_vwap_bias, "open_vwap"),
+        (sma20_bias, "sma20"),
+        (sma50_bias, "sma50"),
+        (roc_mom_bias, "roc_mom"),
+        (vol_bias, "vol"),
+        (rvol_bias, "rvol"),
+        (zscore_bias, "zscore"),
+        (std_bias, "std"),
+        (htf_slope_bias, "htf"),
+        (zone_bias, "zone"),
         (overnight_bias, "overnight"),
         (amd_bias, "amd_sweep"),
         (pattern_bias, "pattern_bias"),
     ]
-    score = sum(_direction_value(s) * weights[key] for s, key in signals)
+    score = 0.0
+    for s, key in signals:
+        score += _direction_value(s) * weights.get(key, 0.0)
     if score > 0.0:
         bias = "Bullish"
     elif score < 0.0:
@@ -197,6 +295,16 @@ def _premarket_signal(
         "premarket_trend": pm_dir,
         "gap": gap_dir,
         "vwap": vwap_bias,
+        "open_vwap": open_vwap_bias,
+        "sma20": sma20_bias,
+        "sma50": sma50_bias,
+        "roc_mom": roc_mom_bias,
+        "vol": vol_bias,
+        "rvol": rvol_bias,
+        "zscore": zscore_bias,
+        "std": std_bias,
+        "htf": htf_slope_bias,
+        "zone": zone_bias,
         "overnight": overnight_bias,
         "amd_sweep": amd_bias,
         "pattern_bias": pattern_bias,
@@ -458,11 +566,36 @@ def build_bias(
     pattern_signals = [s for s in pattern_signals if s in ("Bullish", "Bearish")]
     pattern_bias = max(set(pattern_signals), key=pattern_signals.count) if pattern_signals else "Neutral"
 
+    # Higher-timeframe slope check (1H/4H)
+    htf_bias = "n/a"
+    htf_1h = None
+    htf_4h = None
+    if df_today is not None and not df_today.empty:
+        rs_1h = resample_ohlcv(df_today, "1H")
+        rs_4h = resample_ohlcv(df_today, "4H")
+        if len(rs_1h) >= 10:
+            htf_1h = float(trend_strength(rs_1h["close"], length=10))
+        if len(rs_4h) >= 6:
+            htf_4h = float(trend_strength(rs_4h["close"], length=6))
+        if htf_1h is not None and htf_4h is not None:
+            if htf_1h > 0 and htf_4h > 0:
+                htf_bias = "Bullish"
+            elif htf_1h < 0 and htf_4h < 0:
+                htf_bias = "Bearish"
+            else:
+                htf_bias = "Neutral"
+
     # 4. Early US (US Open Bias) – pre-9:30 finalized at 09:10 ET
     us_open_bias_30 = "Neutral"
     us_open_bias_60 = "Neutral"
     amd_bias, london_close_pos = _amd_signal(asia, london)
-    pre_us_open_bias, pre_details, pre_score = _premarket_signal(df_today, amd_bias, pattern_bias)
+    pre_us_open_bias, pre_details, pre_score = _premarket_signal(
+        df_today,
+        amd_bias,
+        pattern_bias,
+        htf_bias=htf_bias,
+        zone_confluence=zone_confluence,
+    )
     pre_details["london_close"] = london_close_pos
     if pre_us_open_bias in ("Bullish", "Bearish"):
         us_open_bias_30 = pre_us_open_bias
@@ -545,25 +678,6 @@ def build_bias(
         else:
             gap_size = "small"
         gap_label = f"{gap_size} {gap_dir}"
-
-    # Higher-timeframe slope check (1H/4H)
-    htf_bias = "n/a"
-    htf_1h = None
-    htf_4h = None
-    if df_today is not None and not df_today.empty:
-        rs_1h = resample_ohlcv(df_today, "1H")
-        rs_4h = resample_ohlcv(df_today, "4H")
-        if len(rs_1h) >= 10:
-            htf_1h = float(trend_strength(rs_1h["close"], length=10))
-        if len(rs_4h) >= 6:
-            htf_4h = float(trend_strength(rs_4h["close"], length=6))
-        if htf_1h is not None and htf_4h is not None:
-            if htf_1h > 0 and htf_4h > 0:
-                htf_bias = "Bullish"
-            elif htf_1h < 0 and htf_4h < 0:
-                htf_bias = "Bearish"
-            else:
-                htf_bias = "Neutral"
 
     # Opening range signal (30/60m) for daily bias finalization
     or30_signal, _, _ = _opening_range_signal(df_today, minutes=30)
@@ -714,6 +828,7 @@ def build_bias(
         prev_label,
         asia_label,
         london_label,
+        us_open_bias if us_open_bias in ("Bullish", "Bearish") else "Neutral",
         "Bullish" if vwap_posture.daily_above and vwap_posture.weekly_above else "Bearish" if (not vwap_posture.daily_above and not vwap_posture.weekly_above) else "Neutral",
         "Bullish" if overnight_label == "Above" else "Bearish" if overnight_label == "Below" else "Neutral",
         "Bullish" if gap_size == "large" and gap_dir == "up" else "Bearish" if gap_size == "large" and gap_dir == "down" else "Neutral",
