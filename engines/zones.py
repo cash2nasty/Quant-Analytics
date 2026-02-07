@@ -30,6 +30,8 @@ def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     data = df.copy()
     if "timestamp" not in data.columns:
         return pd.DataFrame()
+    if isinstance(rule, str):
+        rule = rule.lower()
     data["timestamp"] = pd.to_datetime(data["timestamp"])
     data = data.sort_values("timestamp").set_index("timestamp")
     ohlc = data.resample(rule).agg(
