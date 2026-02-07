@@ -44,7 +44,8 @@ def render_history():
 
     # Allow user to pick symbol and date to view historical analysis
     symbol = st.text_input("Symbol", value="NQH26", help="Futures symbol to analyze")
-    selected_date = st.date_input("Select date to view", value=dt.datetime.now().date())
+    today = dt.datetime.now().date()
+    selected_date = st.date_input("Select date to view", value=today)
 
     # First try to load saved summary if it exists
     summaries = load_all_summaries()
