@@ -1,14 +1,27 @@
+import datetime as dt
 import pandas as pd
 from typing import Optional
 
 from storage.history_manager import AccuracySummary, BiasSummary
 
 
+def _slice_trading_day(df: pd.DataFrame, trading_date: Optional[dt.date]) -> pd.DataFrame:
+    if df is None or df.empty or trading_date is None or "timestamp" not in df.columns:
+        return df
+    start = dt.datetime.combine(trading_date - dt.timedelta(days=1), dt.time(18, 0))
+    end = dt.datetime.combine(trading_date, dt.time(17, 0))
+    sdf = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+    if sdf is None or sdf.empty:
+        return sdf
+    return sdf.sort_values("timestamp")
+
+
 def _actual_direction(df_today: pd.DataFrame) -> str:
-    if df_today.empty:
+    if df_today is None or df_today.empty:
         return "Neutral"
-    open_ = df_today["open"].iloc[0]
-    close = df_today["close"].iloc[-1]
+    sdf = df_today.sort_values("timestamp") if "timestamp" in df_today.columns else df_today
+    open_ = sdf["open"].iloc[0]
+    close = sdf["close"].iloc[-1]
     diff = close - open_
     if diff > 0:
         return "Bullish"
@@ -17,10 +30,14 @@ def _actual_direction(df_today: pd.DataFrame) -> str:
     return "Neutral"
 
 
-def _actual_direction_window(df_today: pd.DataFrame, minutes: int) -> str:
-    if df_today.empty or "timestamp" not in df_today.columns:
+def _actual_direction_window(
+    df_today: pd.DataFrame,
+    minutes: int,
+    trading_date: Optional[dt.date] = None,
+) -> str:
+    if df_today is None or df_today.empty or "timestamp" not in df_today.columns:
         return "Neutral"
-    date = df_today["timestamp"].iloc[0].date()
+    date = trading_date or df_today["timestamp"].iloc[0].date()
     start = pd.Timestamp.combine(date, pd.Timestamp("09:30").time())
     end = start + pd.Timedelta(minutes=minutes)
     window = df_today[(df_today["timestamp"] >= start) & (df_today["timestamp"] <= end)]
@@ -36,7 +53,11 @@ def _actual_direction_window(df_today: pd.DataFrame, minutes: int) -> str:
     return "Neutral"
 
 
-def evaluate_bias_accuracy(df_today: pd.DataFrame, bias: Optional[BiasSummary]) -> AccuracySummary:
+def evaluate_bias_accuracy(
+    df_today: pd.DataFrame,
+    bias: Optional[BiasSummary],
+    trading_date: Optional[dt.date] = None,
+) -> AccuracySummary:
     """
     Compares the Daily Bias to the actual full-day direction.
     """
@@ -50,10 +71,11 @@ def evaluate_bias_accuracy(df_today: pd.DataFrame, bias: Optional[BiasSummary]) 
             us_open_bias_correct_30=None,
             us_open_bias_correct_60=None,
         )
-    actual = _actual_direction(df_today)
+    df_slice = _slice_trading_day(df_today, trading_date)
+    actual = _actual_direction(df_slice)
     us_open_correct = actual == bias.us_open_bias
-    us_open_actual_30 = _actual_direction_window(df_today, minutes=30)
-    us_open_actual_60 = _actual_direction_window(df_today, minutes=60)
+    us_open_actual_30 = _actual_direction_window(df_today, minutes=30, trading_date=trading_date)
+    us_open_actual_60 = _actual_direction_window(df_today, minutes=60, trading_date=trading_date)
     us_open_bias_30 = getattr(bias, "us_open_bias_30", None)
     us_open_bias_60 = getattr(bias, "us_open_bias_60", None)
     if us_open_bias_30 in ("Bullish", "Bearish"):

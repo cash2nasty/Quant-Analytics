@@ -924,7 +924,8 @@ def main():
     _, trading_end = trading_day_window(effective_date)
     is_trading_day_done = now >= trading_end
     if (effective_date < today or (effective_date == today and is_trading_day_done)) and has_today_data:
-        accuracy = evaluate_bias_accuracy(df_today, bias)
+        source_df = df_sessions_source if df_sessions_source is not None else df_today
+        accuracy = evaluate_bias_accuracy(source_df, bias, trading_date=effective_date)
         st.markdown("### Daily Bias Accuracy (End-of-Day)")
         st.write(f"Actual Direction: {getattr(accuracy,'actual_direction', 'n/a')}")
         st.write(f"Bias Correct: {getattr(accuracy,'bias_correct', 'n/a')}")
@@ -940,7 +941,11 @@ def main():
     # Manual save
     if st.button("Save Today to History"):
         try:
-            acc = evaluate_bias_accuracy(df_today, bias) if effective_date < today and has_today_data else None
+            if effective_date < today and has_today_data:
+                source_df = df_sessions_source if df_sessions_source is not None else df_today
+                acc = evaluate_bias_accuracy(source_df, bias, trading_date=effective_date)
+            else:
+                acc = None
             day_summary = DaySummary(
                 date=str(effective_date),
                 symbol=symbol,
@@ -969,7 +974,8 @@ def main():
             if us_end and now > us_end + dt.timedelta(hours=1):
                 saved = [s for s in load_all_summaries() if s.date == str(today) and s.symbol == symbol]
                 if not saved and has_today_data:
-                    acc = evaluate_bias_accuracy(df_today, bias)
+                    source_df = df_sessions_source if df_sessions_source is not None else df_today
+                    acc = evaluate_bias_accuracy(source_df, bias, trading_date=today)
                     day_summary = DaySummary(
                         date=str(today),
                         symbol=symbol,

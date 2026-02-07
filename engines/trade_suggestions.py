@@ -9,6 +9,21 @@ def build_trade_suggestion(bias: BiasSummary) -> TradeSuggestion:
     daily = bias.daily_bias
     us = getattr(bias, "us_open_bias_60", None) or bias.us_open_bias
     conf = bias.daily_confidence
+    explanation = getattr(bias, "explanation", "") or ""
+    vwap_comment = getattr(bias, "vwap_comment", "") or ""
+
+    if "not finalized until 10:45 ET" in explanation:
+        action = "Wait"
+        rationale = (
+            "Daily bias is not finalized yet (60m OR pending). "
+            "Wait for the 10:45 ET confirmation before taking directional trades."
+        )
+        if us in ("Bullish", "Bearish"):
+            rationale += f" Potential early move: US Open bias is {us.lower()}—look for confirmation."
+        if "Suggestion:" in vwap_comment:
+            vwap_hint = vwap_comment.split("Suggestion:", 1)[-1].strip()
+            rationale += f" VWAP cue: {vwap_hint}"
+        return TradeSuggestion(action=action, rationale=rationale)
 
     if daily == "Neutral" or us == "Neutral":
         action = "Don't Trade"
@@ -16,6 +31,11 @@ def build_trade_suggestion(bias: BiasSummary) -> TradeSuggestion:
             "Bias is Neutral or conflicting; structure does not provide a clear edge. "
             "Stand aside until a clearer directional picture emerges."
         )
+        if us in ("Bullish", "Bearish"):
+            rationale += f" Potential early move: US Open bias is {us.lower()}—wait for confirmation."
+        if "Suggestion:" in vwap_comment:
+            vwap_hint = vwap_comment.split("Suggestion:", 1)[-1].strip()
+            rationale += f" VWAP cue: {vwap_hint}"
     elif daily == us and conf >= 0.7:
         action = "Trade"
         rationale = (
@@ -35,5 +55,8 @@ def build_trade_suggestion(bias: BiasSummary) -> TradeSuggestion:
             f"Daily Bias is {daily} but US Open Bias is {us}, indicating conflict between sessions. "
             "When higher-timeframe and US session structure disagree, the safest choice is not to trade."
         )
+        if "Suggestion:" in vwap_comment:
+            vwap_hint = vwap_comment.split("Suggestion:", 1)[-1].strip()
+            rationale += f" VWAP cue: {vwap_hint}"
 
     return TradeSuggestion(action=action, rationale=rationale)

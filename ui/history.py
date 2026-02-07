@@ -1,14 +1,17 @@
 import datetime as dt
+from typing import Dict, Optional
 import pandas as pd
 import streamlit as st
 from data.data_fetcher import fetch_intraday_ohlcv, filter_date
 from engines.sessions import compute_session_stats
 from engines.patterns import detect_patterns
-from engines.bias import build_bias
+from engines.bias import build_bias, analyze_vwap_posture
 from engines.accuracy import evaluate_bias_accuracy
-from engines.zones import build_htf_zones, summarize_zone_confluence
+from engines.zones import build_htf_zones, summarize_zone_confluence, resample_ohlcv
 from engines.trade_suggestions import build_trade_suggestion
 from storage.history_manager import DaySummary, load_all_summaries, save_day_summary
+from indicators.volatility import atr_like
+from indicators.momentum import roc, trend_strength
 
 
 def _get_prev_day_df(df, date: dt.date):
@@ -37,6 +40,121 @@ def trading_days_between(start_date: dt.date, end_date: dt.date):
             days.append(current)
         current += dt.timedelta(days=1)
     return days
+
+
+def _direction_label(value: float, threshold: float = 0.0) -> str:
+    if value > threshold:
+        return "Bullish"
+    if value < -threshold:
+        return "Bearish"
+    return "Neutral"
+
+
+def _atr_direction_threshold(df_today: pd.DataFrame, df_prev: pd.DataFrame) -> float:
+    ref = df_today if df_today is not None and not df_today.empty else df_prev
+    if ref is None or ref.empty:
+        return 0.0
+    atr_series = atr_like(ref, length=20)
+    if atr_series.empty or pd.isna(atr_series.iloc[-1]):
+        return 0.0
+    return float(atr_series.iloc[-1]) * 0.10
+
+
+def _compute_bias_diagnostics(
+    df_day: pd.DataFrame,
+    df_prev: pd.DataFrame,
+    sessions,
+    bias,
+    zone_confluence=None,
+) -> Optional[Dict[str, object]]:
+    if df_day is None or df_day.empty:
+        return None
+
+    actual_open = float(df_day["open"].iloc[0])
+    actual_close = float(df_day["close"].iloc[-1])
+    actual_move = actual_close - actual_open
+    actual_dir = _direction_label(actual_move)
+
+    prev_raw_label = "n/a"
+    prev_atr_label = "n/a"
+    if df_prev is not None and not df_prev.empty:
+        prev_open = float(df_prev["open"].iloc[0])
+        prev_close = float(df_prev["close"].iloc[-1])
+        prev_raw_label = _direction_label(prev_close - prev_open)
+        atr_threshold = _atr_direction_threshold(df_day, df_prev)
+        prev_atr_label = _direction_label(prev_close - prev_open, threshold=atr_threshold)
+
+    asia = sessions.get("Asia") if sessions else None
+    london = sessions.get("London") if sessions else None
+    asia_label = _direction_label(asia.close - asia.open) if asia else "Neutral"
+    london_label = _direction_label(london.close - london.open) if london else "Neutral"
+
+    us_open_bias = getattr(bias, "us_open_bias_60", None) or getattr(bias, "us_open_bias", "Neutral")
+
+    vwap_posture = analyze_vwap_posture(df_day)
+    if vwap_posture.daily_above and vwap_posture.weekly_above:
+        vwap_label = "Bullish"
+    elif (not vwap_posture.daily_above) and (not vwap_posture.weekly_above):
+        vwap_label = "Bearish"
+    else:
+        vwap_label = "Neutral"
+
+    htf_bias = "Neutral"
+    rs_1h = resample_ohlcv(df_day, "1H")
+    rs_4h = resample_ohlcv(df_day, "4H")
+    if len(rs_1h) >= 10 and len(rs_4h) >= 6:
+        htf_1h = float(trend_strength(rs_1h["close"], length=10))
+        htf_4h = float(trend_strength(rs_4h["close"], length=6))
+        if htf_1h > 0 and htf_4h > 0:
+            htf_bias = "Bullish"
+        elif htf_1h < 0 and htf_4h < 0:
+            htf_bias = "Bearish"
+
+    roc_series = roc(df_day["close"], length=10) if len(df_day) >= 10 else pd.Series(dtype=float)
+    last_roc = float(roc_series.iloc[-1]) if len(roc_series) else 0.0
+    roc_bias = "Bullish" if last_roc > 0 else "Bearish" if last_roc < 0 else "Neutral"
+
+    zone_bias = "Neutral"
+    zone_score = 0.0
+    if zone_confluence is not None:
+        zone_bias = zone_confluence.bias
+        zone_score = float(zone_confluence.score)
+
+    signals = [
+        ("Previous day (raw)", prev_raw_label),
+        ("Previous day (ATR)", prev_atr_label),
+        ("Asia", asia_label),
+        ("London", london_label),
+        ("US Open", us_open_bias),
+        ("VWAP posture", vwap_label),
+        ("HTF slope", htf_bias),
+        ("ROC", roc_bias),
+        ("Zones", zone_bias),
+    ]
+
+    def _is_opposite(a: str, b: str) -> bool:
+        return (a == "Bullish" and b == "Bearish") or (a == "Bearish" and b == "Bullish")
+
+    support = [name for name, label in signals if label == actual_dir]
+    conflict = [name for name, label in signals if _is_opposite(label, actual_dir)]
+
+    rationale = (
+        f"The actual move was {actual_dir.lower()}, while the model predicted {getattr(bias, 'daily_bias', 'n/a').lower()}. "
+        f"Conflicting signals included {', '.join(conflict) if conflict else 'none'}. "
+        f"Supporting signals included {', '.join(support) if support else 'none'}. "
+        "This suggests the bias likely missed a reversal or liquidity-driven move where opposing signals outweighed the dominant inputs."
+    )
+
+    return {
+        "actual_dir": actual_dir,
+        "actual_open": actual_open,
+        "actual_close": actual_close,
+        "predicted": getattr(bias, "daily_bias", "n/a"),
+        "support": support,
+        "conflict": conflict,
+        "zone_score": zone_score,
+        "rationale": rationale,
+    }
 
 
 def render_history():
@@ -76,6 +194,7 @@ def render_history():
             scored = []
             used_ticker = ""
             missing_data_days = []
+            missing_session_days = []
             if use_recompute:
                 max_lookback_days = 59
                 limited_start = start_date
@@ -112,6 +231,9 @@ def render_history():
                                 .reset_index(drop=True)
                             )
                         sessions = compute_session_stats(df_sessions_source, day)
+                        if not all(k in sessions for k in ("Asia", "London")):
+                            missing_session_days.append((day, "Missing Asia/London session data"))
+                            continue
                         patterns = detect_patterns(sessions, df_day, df_prev)
                         zone_confluence = None
                         if df_sessions_source is not None and not df_sessions_source.empty:
@@ -125,14 +247,24 @@ def render_history():
                             zone_confluence=zone_confluence,
                             vol_thresholds=(p_low, p_high),
                         )
-                        accuracy = evaluate_bias_accuracy(df_day, bias)
+                        accuracy = evaluate_bias_accuracy(df_sessions_source, bias, trading_date=day)
                         scored.append({"date": day, "accuracy": accuracy, "bias": bias, "patterns": patterns})
             else:
                 scored = [
                     {"date": dt.date.fromisoformat(s.date), "accuracy": s.accuracy, "bias": s.bias, "patterns": s.patterns}
                     for s in in_range
-                    if s.accuracy and s.accuracy.actual_direction != "n/a"
+                    if s.accuracy
+                    and s.accuracy.actual_direction != "n/a"
+                    and s.sessions is not None
+                    and all(k in s.sessions for k in ("Asia", "London"))
                 ]
+                missing_session_days.extend(
+                    [
+                        (dt.date.fromisoformat(s.date), "Missing Asia/London session data")
+                        for s in in_range
+                        if s.sessions is None or not all(k in s.sessions for k in ("Asia", "London"))
+                    ]
+                )
 
             acc_list = [item["accuracy"] for item in scored]
             excluded_daily = [
@@ -295,7 +427,7 @@ def render_history():
                 except Exception:
                     st.caption("Pattern weights could not be saved.")
 
-            if excluded_daily or excluded_30 or excluded_60:
+            if excluded_daily or excluded_30 or excluded_60 or missing_session_days:
                 st.subheader("Excluded Days")
                 excluded_rows = []
                 for day in excluded_daily:
@@ -304,6 +436,8 @@ def render_history():
                     excluded_rows.append({"Date": day.isoformat(), "Excluded From": "US Open 30m", "Reason": reason})
                 for day, reason in excluded_60:
                     excluded_rows.append({"Date": day.isoformat(), "Excluded From": "US Open 60m", "Reason": reason})
+                for day, reason in missing_session_days:
+                    excluded_rows.append({"Date": day.isoformat(), "Excluded From": "Daily", "Reason": reason})
                 if excluded_rows:
                     st.dataframe(pd.DataFrame(excluded_rows), use_container_width=True)
 
@@ -320,6 +454,9 @@ def render_history():
         if s.date == selected_date.isoformat() and s.symbol == symbol:
             saved = s
             break
+
+    df_day = None
+    df_prev = None
 
     if saved:
         s = saved
@@ -350,7 +487,7 @@ def render_history():
         suggestion = build_trade_suggestion(bias)
         # Only compute accuracy for fully completed historical days
         if selected_date < today:
-            accuracy = evaluate_bias_accuracy(df_day, bias)
+            accuracy = evaluate_bias_accuracy(df_sessions_source, bias, trading_date=selected_date)
         else:
             accuracy = None
 
@@ -426,8 +563,43 @@ def render_history():
     st.write(f"VWAP Reclaim/Reject: {getattr(p,'vwap_reclaim_reject', False)} ({getattr(p,'vwap_reclaim_reject_bias', 'n/a')})")
     st.info(p.notes)
 
+    # Ensure we have prev-day data for bias context display
+    if df_day is None or df_prev is None:
+        df, _ = fetch_intraday_ohlcv(symbol, lookback_days=selected_date)
+        df_day = filter_date(df, selected_date)
+        df_prev = _get_prev_day_df(df, selected_date)
+
+    df_sessions_source = None
+    zone_confluence = None
+    if df_day is not None and not df_day.empty:
+        df_sessions_source = df_day
+        if df_prev is not None and not df_prev.empty:
+            df_sessions_source = (
+                pd.concat([df_prev, df_day], ignore_index=True)
+                .sort_values("timestamp")
+                .reset_index(drop=True)
+            )
+        htf_zones = build_htf_zones(df_sessions_source)
+        last_price = float(df_sessions_source["close"].iloc[-1]) if not df_sessions_source.empty else None
+        zone_confluence = summarize_zone_confluence(htf_zones, last_price)
+
     st.markdown("### Bias")
     b = s.bias
+    if df_prev is not None and not df_prev.empty:
+        prev_open = float(df_prev["open"].iloc[0])
+        prev_close = float(df_prev["close"].iloc[-1])
+        prev_move = prev_close - prev_open
+        prev_raw_label = _direction_label(prev_move)
+        atr_threshold = _atr_direction_threshold(df_day, df_prev)
+        prev_atr_label = _direction_label(prev_move, threshold=atr_threshold)
+        atr_reason = (
+            f"Move {prev_move:+.2f} vs ATR threshold {atr_threshold:.2f} -> {prev_atr_label}"
+        )
+        st.write(f"Previous Day Direction: {prev_raw_label}")
+        st.write(f"Previous Day Direction (ATR-adjusted): {prev_atr_label} ({atr_reason})")
+    else:
+        st.write("Previous Day Direction: n/a")
+        st.write("Previous Day Direction (ATR-adjusted): n/a")
     st.write(f"Daily Bias: {b.daily_bias} ({b.daily_confidence:.0%})")
     us30 = getattr(b, "us_open_bias_30", None) or b.us_open_bias
     us60 = getattr(b, "us_open_bias_60", None) or b.us_open_bias
@@ -449,10 +621,37 @@ def render_history():
         st.write(f"News Comment: {b.news_comment}")
     st.info(b.explanation)
 
+
+    diagnostics = _compute_bias_diagnostics(df_day, df_prev, s.sessions, b, zone_confluence=zone_confluence)
+    st.markdown("### Diagnostics")
+    if diagnostics is None:
+        st.info("Diagnostics unavailable (missing data).")
+    else:
+        st.write(
+            f"Actual direction: {diagnostics['actual_dir']} "
+            f"(open {diagnostics['actual_open']:.2f} -> close {diagnostics['actual_close']:.2f})"
+        )
+        st.write(f"Predicted daily bias: {diagnostics['predicted']}")
+        if diagnostics["conflict"]:
+            st.write("Conflicting signals: " + ", ".join(diagnostics["conflict"]))
+        if diagnostics["support"]:
+            st.write("Supporting signals: " + ", ".join(diagnostics["support"]))
+        if zone_confluence is not None:
+            st.write(
+                f"Zone confluence: {zone_confluence.bias} "
+                f"(score {zone_confluence.score:.2f}; {zone_confluence.notes})"
+            )
+        st.write(diagnostics["rationale"])
+
     st.markdown("### Daily High/Low (End-of-Day)")
     if getattr(s, "day_high", None) is not None and getattr(s, "day_low", None) is not None:
         st.write(f"High: {s.day_high:.2f}")
         st.write(f"Low: {s.day_low:.2f}")
+        if selected_date < today and df_day is not None and not df_day.empty:
+            day_open = float(df_day["open"].iloc[0])
+            day_close = float(df_day["close"].iloc[-1])
+            st.write(f"Open: {day_open:.2f}")
+            st.write(f"Close: {day_close:.2f}")
     elif isinstance(s, DaySummary):
         st.info("Daily high/low not stored for this day.")
 
