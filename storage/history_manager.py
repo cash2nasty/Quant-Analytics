@@ -25,6 +25,25 @@ class PatternSummary:
     trend_day: bool
     volatility_expansion: bool
     notes: str
+    asia_range_hold: Optional[bool] = None
+    asia_range_sweep: Optional[bool] = None
+    asia_range_sweep_bias: Optional[str] = None
+    london_continuation: Optional[bool] = None
+    london_continuation_bias: Optional[str] = None
+    us_open_gap_fill: Optional[bool] = None
+    us_open_gap_fill_bias: Optional[str] = None
+    orb_30: Optional[bool] = None
+    orb_30_bias: Optional[str] = None
+    orb_60: Optional[bool] = None
+    orb_60_bias: Optional[str] = None
+    failed_orb_30: Optional[bool] = None
+    failed_orb_30_bias: Optional[str] = None
+    failed_orb_60: Optional[bool] = None
+    failed_orb_60_bias: Optional[str] = None
+    power_hour_trend: Optional[bool] = None
+    power_hour_bias: Optional[str] = None
+    vwap_reclaim_reject: Optional[bool] = None
+    vwap_reclaim_reject_bias: Optional[str] = None
 
 
 @dataclass
@@ -40,6 +59,7 @@ class BiasSummary:
     us_open_confidence_30: Optional[float] = None
     us_open_bias_60: Optional[str] = None
     us_open_confidence_60: Optional[float] = None
+    amd_summary: Optional[str] = None
 
 
 @dataclass
@@ -95,7 +115,33 @@ def load_all_summaries() -> List[DaySummary]:
         with open(path, "r") as f:
             data = json.load(f)
         sessions = {k: SessionStats(**v) for k, v in data["sessions"].items()}
-        patterns = PatternSummary(**data["patterns"])
+        p = data.get("patterns", {})
+        patterns = PatternSummary(
+            london_breakout=p.get("london_breakout", False),
+            whipsaw=p.get("whipsaw", False),
+            trend_day=p.get("trend_day", False),
+            volatility_expansion=p.get("volatility_expansion", False),
+            notes=p.get("notes", ""),
+            asia_range_hold=p.get("asia_range_hold"),
+            asia_range_sweep=p.get("asia_range_sweep"),
+            asia_range_sweep_bias=p.get("asia_range_sweep_bias"),
+            london_continuation=p.get("london_continuation"),
+            london_continuation_bias=p.get("london_continuation_bias"),
+            us_open_gap_fill=p.get("us_open_gap_fill"),
+            us_open_gap_fill_bias=p.get("us_open_gap_fill_bias"),
+            orb_30=p.get("orb_30"),
+            orb_30_bias=p.get("orb_30_bias"),
+            orb_60=p.get("orb_60"),
+            orb_60_bias=p.get("orb_60_bias"),
+            failed_orb_30=p.get("failed_orb_30"),
+            failed_orb_30_bias=p.get("failed_orb_30_bias"),
+            failed_orb_60=p.get("failed_orb_60"),
+            failed_orb_60_bias=p.get("failed_orb_60_bias"),
+            power_hour_trend=p.get("power_hour_trend"),
+            power_hour_bias=p.get("power_hour_bias"),
+            vwap_reclaim_reject=p.get("vwap_reclaim_reject"),
+            vwap_reclaim_reject_bias=p.get("vwap_reclaim_reject_bias"),
+        )
         bias = BiasSummary(**data["bias"])
         trade_suggestion = TradeSuggestion(**data["trade_suggestion"])
         acc_data = data.get("accuracy", {})

@@ -194,7 +194,12 @@ def compute_trading_day_extremes(df: pd.DataFrame, trading_date: dt.date):
     return (float(sdf["high"].max()), float(sdf["low"].min()), start, end)
 
 
-def build_preview_bias(df_prev: pd.DataFrame, sessions, zone_confluence=None) -> BiasSummary:
+def build_preview_bias(
+    df_prev: pd.DataFrame,
+    sessions,
+    prev_sessions=None,
+    zone_confluence=None,
+) -> BiasSummary:
     prev_label = "Neutral"
     if df_prev is not None and not df_prev.empty:
         prev_open = df_prev["open"].iloc[0]
@@ -217,6 +222,27 @@ def build_preview_bias(df_prev: pd.DataFrame, sessions, zone_confluence=None) ->
         "Pre-session bias based on the previous trading day. "
         "Asia and London will update the bias as their sessions complete."
     )
+
+    if df_prev is not None and not df_prev.empty and prev_sessions:
+        prev_patterns = detect_patterns(prev_sessions, df_prev, None)
+        next_bias = getattr(prev_patterns, "power_hour_bias", None)
+        if next_bias in ("Bullish", "Bearish"):
+            if daily_bias == "Neutral":
+                daily_bias = next_bias
+                daily_conf += 0.05
+                explanation += f" Late-day power hour suggests {next_bias} next-day bias."
+            elif daily_bias == next_bias:
+                daily_conf += 0.03
+                explanation += f" Power hour aligned with next-day {next_bias} bias."
+        vwap_bias = getattr(prev_patterns, "vwap_reclaim_reject_bias", None)
+        if vwap_bias in ("Bullish", "Bearish"):
+            if daily_bias == "Neutral":
+                daily_bias = vwap_bias
+                daily_conf += 0.05
+                explanation += f" VWAP reclaim/reject suggests {vwap_bias} next-day bias."
+            elif daily_bias == vwap_bias:
+                daily_conf += 0.03
+                explanation += f" VWAP reclaim/reject aligned with {vwap_bias} bias."
 
     if zone_confluence is not None and zone_confluence.bias != "Neutral":
         score = abs(zone_confluence.score)
@@ -464,7 +490,7 @@ def main():
                 st.write("No data for this session yet.")
 
     # Patterns
-    patterns = detect_patterns(sessions)
+    patterns = detect_patterns(sessions, df_today if has_today_data else None, df_prev)
     st.markdown("### Structural Patterns")
     st.write(f"London Breakout: {getattr(patterns,'london_breakout', False)}")
     st.write(f"Whipsaw: {getattr(patterns,'whipsaw', False)}")
@@ -473,6 +499,16 @@ def main():
         trend_label = f" ({trend_day_direction(sessions)})"
     st.write(f"Trend Day: {getattr(patterns,'trend_day', False)}{trend_label}")
     st.write(f"Volatility Expansion: {getattr(patterns,'volatility_expansion', False)}")
+    st.write(f"Asia Range Hold: {getattr(patterns,'asia_range_hold', False)}")
+    st.write(f"Asia Range Sweep: {getattr(patterns,'asia_range_sweep', False)} ({getattr(patterns,'asia_range_sweep_bias', 'n/a')})")
+    st.write(f"London Continuation: {getattr(patterns,'london_continuation', False)} ({getattr(patterns,'london_continuation_bias', 'n/a')})")
+    st.write(f"US Open Gap Fill: {getattr(patterns,'us_open_gap_fill', False)} ({getattr(patterns,'us_open_gap_fill_bias', 'n/a')})")
+    st.write(f"ORB 30m: {getattr(patterns,'orb_30', False)} ({getattr(patterns,'orb_30_bias', 'n/a')})")
+    st.write(f"ORB 60m: {getattr(patterns,'orb_60', False)} ({getattr(patterns,'orb_60_bias', 'n/a')})")
+    st.write(f"Failed ORB 30m: {getattr(patterns,'failed_orb_30', False)} ({getattr(patterns,'failed_orb_30_bias', 'n/a')})")
+    st.write(f"Failed ORB 60m: {getattr(patterns,'failed_orb_60', False)} ({getattr(patterns,'failed_orb_60_bias', 'n/a')})")
+    st.write(f"Power Hour Trend: {getattr(patterns,'power_hour_trend', False)} ({getattr(patterns,'power_hour_bias', 'n/a')})")
+    st.write(f"VWAP Reclaim/Reject: {getattr(patterns,'vwap_reclaim_reject', False)} ({getattr(patterns,'vwap_reclaim_reject_bias', 'n/a')})")
     if getattr(patterns, "notes", None):
         st.info(patterns.notes)
 
@@ -586,7 +622,7 @@ def main():
             vol_thresholds=(p_low, p_high),
         )
     else:
-        bias = build_preview_bias(df_prev, sessions, zone_confluence=zone_confluence)
+        bias = build_preview_bias(df_prev, sessions, prev_sessions, zone_confluence=zone_confluence)
     st.markdown("### Bias")
     st.write(f"Daily Bias: {getattr(bias,'daily_bias', 'n/a')} ({getattr(bias,'daily_confidence', 0):.0%})")
     us_30 = getattr(bias, "us_open_bias_30", None) or getattr(bias, "us_open_bias", "n/a")
@@ -602,6 +638,8 @@ def main():
     st.caption("Finalized at 09:10 ET using overnight range, gap, VWAP, and premarket trend.")
     st.write(f"VWAP Posture: {getattr(bias,'vwap_comment', '')}")
     st.write(f"News Effect: {getattr(bias,'news_comment', '')}")
+    if getattr(bias, "amd_summary", None):
+        st.write(f"AMD: {bias.amd_summary}")
     if getattr(bias, "explanation", None):
         st.info(bias.explanation)
 

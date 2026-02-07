@@ -1,8 +1,10 @@
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from indicators.moving_averages import compute_daily_vwap, compute_weekly_vwap
 from indicators.volatility import rolling_volatility, classify_volatility, atr_like
@@ -11,6 +13,7 @@ from indicators.volume import rvol
 from indicators.trend import classify_trend
 from data.news_fetcher import combine_news_signals
 from data.event_calendar import load_event_calendar
+from engines.patterns import detect_patterns
 from storage.history_manager import SessionStats, BiasSummary
 from engines.zones import ZoneConfluence, resample_ohlcv
 
@@ -117,7 +120,11 @@ def _opening_range_signal(df_today: pd.DataFrame, minutes: int = 60) -> Tuple[st
     return "Neutral", or_high, or_low
 
 
-def _premarket_signal(df_today: pd.DataFrame) -> Tuple[str, Dict[str, str], int]:
+def _premarket_signal(
+    df_today: pd.DataFrame,
+    amd_bias: str,
+    pattern_bias: str,
+) -> Tuple[str, Dict[str, str], float]:
     if df_today is None or df_today.empty or "timestamp" not in df_today.columns:
         return "Neutral", {}, 0
     date = df_today["timestamp"].iloc[0].date()
@@ -158,22 +165,78 @@ def _premarket_signal(df_today: pd.DataFrame) -> Tuple[str, Dict[str, str], int]
     elif pm_close < pm_low + tol:
         overnight_bias = "Bearish"
 
-    signals = [pm_dir, gap_dir, vwap_bias, overnight_bias]
-    score = sum(_direction_value(s) for s in signals)
-    if score > 1:
+    weights = {
+        "premarket_trend": 0.30,
+        "overnight": 0.25,
+        "vwap": 0.15,
+        "gap": 0.10,
+        "amd_sweep": 0.20,
+        "pattern_bias": 0.10,
+    }
+    signals = [
+        (pm_dir, "premarket_trend"),
+        (gap_dir, "gap"),
+        (vwap_bias, "vwap"),
+        (overnight_bias, "overnight"),
+        (amd_bias, "amd_sweep"),
+        (pattern_bias, "pattern_bias"),
+    ]
+    score = sum(_direction_value(s) * weights[key] for s, key in signals)
+    if score > 0.0:
         bias = "Bullish"
-    elif score < -1:
+    elif score < 0.0:
         bias = "Bearish"
     else:
         bias = "Neutral"
+
+    # Directional fallback: use overnight edge when mixed
+    if bias == "Neutral" and overnight_bias in ("Bullish", "Bearish"):
+        bias = overnight_bias
 
     details = {
         "premarket_trend": pm_dir,
         "gap": gap_dir,
         "vwap": vwap_bias,
         "overnight": overnight_bias,
+        "amd_sweep": amd_bias,
+        "pattern_bias": pattern_bias,
     }
-    return bias, details, score
+    return bias, details, float(score)
+
+
+def _amd_signal(asia: Optional[SessionStats], london: Optional[SessionStats]) -> Tuple[str, str]:
+    if not asia or not london:
+        return "Neutral", "Unknown"
+    swept_high = london.high >= asia.high
+    swept_low = london.low <= asia.low
+    if swept_high and not swept_low:
+        sweep_bias = "Bearish"
+    elif swept_low and not swept_high:
+        sweep_bias = "Bullish"
+    else:
+        sweep_bias = "Neutral"
+
+    if london.close > asia.high:
+        close_position = "OutsideHigh"
+    elif london.close < asia.low:
+        close_position = "OutsideLow"
+    else:
+        close_position = "Inside"
+
+    if close_position == "OutsideHigh":
+        close_bias = "Bullish"
+    elif close_position == "OutsideLow":
+        close_bias = "Bearish"
+    else:
+        close_bias = "Neutral"
+
+    if sweep_bias != "Neutral" and close_bias == "Neutral":
+        return sweep_bias, close_position
+    if sweep_bias == "Neutral" and close_bias != "Neutral":
+        return close_bias, close_position
+    if sweep_bias == close_bias and sweep_bias != "Neutral":
+        return sweep_bias, close_position
+    return "Neutral", close_position
 
 
 def _kalman_trend_signal(series: pd.Series) -> Tuple[str, float]:
@@ -288,6 +351,21 @@ def _bayes_bias(signals: List[str], weight: float, weight_scale: float) -> Tuple
     return "Neutral", prob
 
 
+def _load_pattern_weights() -> Dict[str, float]:
+    path = Path("data") / "pattern_weights.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    weights = data.get("weights", data)
+    if not isinstance(weights, dict):
+        return {}
+    return {str(k): float(v) for k, v in weights.items() if isinstance(v, (int, float))}
+
+
 
 
 def _atr_direction_threshold(
@@ -371,10 +449,21 @@ def build_bias(
         daily_bias = max(set(votes), key=votes.count)
         daily_bias_source = "simple majority vote"
 
+    # Patterns (session + intraday)
+    patterns = detect_patterns(sessions, df_today, df_prev)
+    pattern_signals = [
+        getattr(patterns, "london_continuation_bias", None),
+        getattr(patterns, "asia_range_sweep_bias", None),
+    ]
+    pattern_signals = [s for s in pattern_signals if s in ("Bullish", "Bearish")]
+    pattern_bias = max(set(pattern_signals), key=pattern_signals.count) if pattern_signals else "Neutral"
+
     # 4. Early US (US Open Bias) – pre-9:30 finalized at 09:10 ET
     us_open_bias_30 = "Neutral"
     us_open_bias_60 = "Neutral"
-    pre_us_open_bias, pre_details, pre_score = _premarket_signal(df_today)
+    amd_bias, london_close_pos = _amd_signal(asia, london)
+    pre_us_open_bias, pre_details, pre_score = _premarket_signal(df_today, amd_bias, pattern_bias)
+    pre_details["london_close"] = london_close_pos
     if pre_us_open_bias in ("Bullish", "Bearish"):
         us_open_bias_30 = pre_us_open_bias
         us_open_bias_60 = pre_us_open_bias
@@ -603,6 +692,23 @@ def build_bias(
     else:
         prior_scale = 1.0
 
+    daily_pattern_signals = [
+        pattern_bias,
+        getattr(patterns, "us_open_gap_fill_bias", None),
+        getattr(patterns, "orb_60_bias", None),
+        getattr(patterns, "failed_orb_60_bias", None),
+        getattr(patterns, "vwap_reclaim_reject_bias", None),
+        getattr(patterns, "power_hour_bias", None),
+    ]
+    daily_pattern_signals = [s for s in daily_pattern_signals if s in ("Bullish", "Bearish")]
+    alignment_set = [daily_bias, htf_bias, roc_bias, ("Bullish" if vwap_posture.daily_above else "Bearish")]
+    pattern_bias_today = None
+    if daily_pattern_signals:
+        pattern_bias_today = max(set(daily_pattern_signals), key=daily_pattern_signals.count)
+        alignment_count = sum(1 for s in alignment_set if s == pattern_bias_today)
+        if alignment_count < 2:
+            pattern_bias_today = None
+
     # Ensemble scoring (equal weights)
     signal_list = [
         prev_label,
@@ -616,6 +722,14 @@ def build_bias(
         kalman_bias if kalman_bias in ("Bullish", "Bearish") else "Neutral",
         daily_or_signal if daily_or_signal in ("Bullish", "Bearish") else "Neutral",
     ]
+    pattern_weight = None
+    if pattern_bias_today:
+        weights = _load_pattern_weights()
+        pattern_weight = weights.get(pattern_bias_today.lower(), weights.get("default", 0.5))
+        if pattern_weight >= 0.6:
+            signal_list.extend([pattern_bias_today, pattern_bias_today])
+        elif pattern_weight >= 0.4:
+            signal_list.append(pattern_bias_today)
     score = sum(_direction_value(s) for s in signal_list)
     if score > 1:
         ensemble_bias = "Bullish"
@@ -675,10 +789,18 @@ def build_bias(
     elif pre_us_open_bias == "Neutral":
         impact_notes.append("US Open bias is neutral due to mixed premarket signals.")
 
+    if amd_bias in ("Bullish", "Bearish"):
+        impact_notes.append(
+            f"AMD signal favors {amd_bias.lower()} distribution; London close {london_close_pos.lower()}."
+        )
+
     if daily_or_signal in ("Bullish", "Bearish"):
         impact_notes.append(f"Daily bias confirmed after 10:45 ET by 60m OR ({daily_or_signal.lower()}).")
     elif daily_or_signal == "pending":
         impact_notes.append("Daily bias not finalized until 10:45 ET (60m OR pending).")
+
+    if pattern_bias_today:
+        impact_notes.append("Patterns aligned with other confluences and tilted the bias.")
 
     if kalman_bias in ("Bullish", "Bearish"):
         impact_notes.append("Kalman trend aligns bias with smoothed slope.")
@@ -746,4 +868,9 @@ def build_bias(
         explanation=explanation,
         vwap_comment=vwap_posture.comment,
         news_comment=news_signal.explanation,
+        amd_summary=(
+            f"Sweep {amd_bias.lower()}; London close {london_close_pos.lower()}"
+            if amd_bias in ("Bullish", "Bearish") or london_close_pos != "Unknown"
+            else None
+        ),
     )

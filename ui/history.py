@@ -100,6 +100,7 @@ def render_history():
                                 .reset_index(drop=True)
                             )
                         sessions = compute_session_stats(df_sessions_source, day)
+                        patterns = detect_patterns(sessions, df_day, df_prev)
                         zone_confluence = None
                         if df_sessions_source is not None and not df_sessions_source.empty:
                             htf_zones = build_htf_zones(df_sessions_source)
@@ -113,10 +114,10 @@ def render_history():
                             vol_thresholds=(p_low, p_high),
                         )
                         accuracy = evaluate_bias_accuracy(df_day, bias)
-                        scored.append({"date": day, "accuracy": accuracy, "bias": bias})
+                        scored.append({"date": day, "accuracy": accuracy, "bias": bias, "patterns": patterns})
             else:
                 scored = [
-                    {"date": dt.date.fromisoformat(s.date), "accuracy": s.accuracy, "bias": s.bias}
+                    {"date": dt.date.fromisoformat(s.date), "accuracy": s.accuracy, "bias": s.bias, "patterns": s.patterns}
                     for s in in_range
                     if s.accuracy and s.accuracy.actual_direction != "n/a"
                 ]
@@ -206,6 +207,82 @@ def render_history():
                 st.subheader("Wrong Days")
                 st.dataframe(pd.DataFrame(wrong_rows), use_container_width=True)
 
+            # Pattern impact report (flip/boost candidates)
+            pattern_rows = []
+            pattern_hits = {}
+            for item in scored:
+                acc = item["accuracy"]
+                bias = item["bias"]
+                patterns = item["patterns"]
+                actual = acc.actual_direction
+                pattern_biases = [
+                    getattr(patterns, "asia_range_sweep_bias", None),
+                    getattr(patterns, "london_continuation_bias", None),
+                    getattr(patterns, "us_open_gap_fill_bias", None),
+                    getattr(patterns, "orb_30_bias", None),
+                    getattr(patterns, "orb_60_bias", None),
+                    getattr(patterns, "failed_orb_30_bias", None),
+                    getattr(patterns, "failed_orb_60_bias", None),
+                    getattr(patterns, "power_hour_bias", None),
+                    getattr(patterns, "vwap_reclaim_reject_bias", None),
+                ]
+                pattern_biases = [p for p in pattern_biases if p in ("Bullish", "Bearish")]
+                if not pattern_biases:
+                    continue
+                pattern_bias = max(set(pattern_biases), key=pattern_biases.count)
+                support = sum(1 for p in pattern_biases if p == pattern_bias)
+
+                if pattern_bias != bias.daily_bias and actual == pattern_bias and support >= 2:
+                    pattern_rows.append(
+                        {
+                            "Date": item["date"].isoformat(),
+                            "Pattern Bias": pattern_bias,
+                            "Outcome": "Could Flip",
+                            "Support": support,
+                        }
+                    )
+                if bias.daily_bias == actual and bias.daily_confidence < 0.6 and pattern_bias == bias.daily_bias:
+                    pattern_rows.append(
+                        {
+                            "Date": item["date"].isoformat(),
+                            "Pattern Bias": pattern_bias,
+                            "Outcome": "Confidence Boost",
+                            "Support": support,
+                        }
+                    )
+
+                for p in pattern_biases:
+                    pattern_hits.setdefault(p, {"total": 0, "correct": 0})
+                    pattern_hits[p]["total"] += 1
+                    if actual == p:
+                        pattern_hits[p]["correct"] += 1
+
+            if pattern_rows:
+                st.subheader("Pattern Impact Report")
+                st.dataframe(pd.DataFrame(pattern_rows), use_container_width=True)
+
+            if pattern_hits:
+                weight_rows = []
+                for bias_dir, stats in pattern_hits.items():
+                    hit_rate = stats["correct"] / max(1, stats["total"])
+                    weight_rows.append({"Bias": bias_dir, "Hit Rate": f"{hit_rate:.0%}"})
+                st.subheader("Pattern Effectiveness")
+                st.dataframe(pd.DataFrame(weight_rows), use_container_width=True)
+
+                weights = {
+                    "default": 0.5,
+                }
+                for bias_dir, stats in pattern_hits.items():
+                    hit_rate = stats["correct"] / max(1, stats["total"])
+                    weights[bias_dir.lower()] = round(hit_rate, 3)
+                try:
+                    path = Path("data") / "pattern_weights.json"
+                    with open(path, "w") as f:
+                        json.dump({"weights": weights}, f, indent=2)
+                    st.caption("Updated pattern weights for future bias calculations.")
+                except Exception:
+                    st.caption("Pattern weights could not be saved.")
+
             if excluded_daily or excluded_30 or excluded_60:
                 st.subheader("Excluded Days")
                 excluded_rows = []
@@ -256,7 +333,7 @@ def render_history():
                 .reset_index(drop=True)
             )
         sessions = compute_session_stats(df_sessions_source, selected_date)
-        patterns = detect_patterns(sessions)
+        patterns = detect_patterns(sessions, df_day, df_prev)
         p_low = float(st.session_state.get("vol_p_low", 0.30))
         p_high = float(st.session_state.get("vol_p_high", 0.70))
         bias = build_bias(df_day, df_prev, sessions, vol_thresholds=(p_low, p_high))
@@ -327,6 +404,16 @@ def render_history():
     st.write(f"Whipsaw: {p.whipsaw}")
     st.write(f"Trend Day: {p.trend_day}")
     st.write(f"Volatility Expansion: {p.volatility_expansion}")
+    st.write(f"Asia Range Hold: {getattr(p,'asia_range_hold', False)}")
+    st.write(f"Asia Range Sweep: {getattr(p,'asia_range_sweep', False)} ({getattr(p,'asia_range_sweep_bias', 'n/a')})")
+    st.write(f"London Continuation: {getattr(p,'london_continuation', False)} ({getattr(p,'london_continuation_bias', 'n/a')})")
+    st.write(f"US Open Gap Fill: {getattr(p,'us_open_gap_fill', False)} ({getattr(p,'us_open_gap_fill_bias', 'n/a')})")
+    st.write(f"ORB 30m: {getattr(p,'orb_30', False)} ({getattr(p,'orb_30_bias', 'n/a')})")
+    st.write(f"ORB 60m: {getattr(p,'orb_60', False)} ({getattr(p,'orb_60_bias', 'n/a')})")
+    st.write(f"Failed ORB 30m: {getattr(p,'failed_orb_30', False)} ({getattr(p,'failed_orb_30_bias', 'n/a')})")
+    st.write(f"Failed ORB 60m: {getattr(p,'failed_orb_60', False)} ({getattr(p,'failed_orb_60_bias', 'n/a')})")
+    st.write(f"Power Hour Trend: {getattr(p,'power_hour_trend', False)} ({getattr(p,'power_hour_bias', 'n/a')})")
+    st.write(f"VWAP Reclaim/Reject: {getattr(p,'vwap_reclaim_reject', False)} ({getattr(p,'vwap_reclaim_reject_bias', 'n/a')})")
     st.info(p.notes)
 
     st.markdown("### Bias")
@@ -343,6 +430,8 @@ def render_history():
     st.write(f"US Open Bias 30m: {us30} ({us30_conf:.0%})")
     st.write(f"US Open Bias 60m: {us60} ({us60_conf:.0%})")
     st.caption("Finalized at 09:10 ET using overnight range, gap, VWAP, and premarket trend.")
+    if getattr(b, "amd_summary", None):
+        st.write(f"AMD: {b.amd_summary}")
     # vwap_comment/news_comment may not exist for older saved objects; guard
     if hasattr(b, "vwap_comment"):
         st.write(f"VWAP Comment: {b.vwap_comment}")
