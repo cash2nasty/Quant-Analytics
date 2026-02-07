@@ -76,9 +76,18 @@ def render_history():
             used_ticker = ""
             missing_data_days = []
             if use_recompute:
-                today = dt.datetime.now().date()
-                days_needed = max(1, (today - start_date).days + 1)
-                df, used_ticker = fetch_intraday_ohlcv(symbol, lookback_days=days_needed + 1)
+                max_lookback_days = 59
+                limited_start = start_date
+                if (end_date - start_date).days > max_lookback_days:
+                    limited_start = end_date - dt.timedelta(days=max_lookback_days)
+                    st.warning(
+                        "Intraday data provider only supports the last 60 days. "
+                        f"Recomputing from {limited_start.isoformat()} to {end_date.isoformat()}."
+                    )
+                    missing_data_days.extend([d for d in trading_days if d < limited_start])
+
+                fetch_start = limited_start - dt.timedelta(days=1)
+                df, used_ticker = fetch_intraday_ohlcv(symbol, lookback_days=(fetch_start, end_date))
                 if df is None or df.empty:
                     st.warning("No data available to recompute this range.")
                 else:
@@ -87,6 +96,8 @@ def render_history():
                     p_low = float(st.session_state.get("vol_p_low", 0.30))
                     p_high = float(st.session_state.get("vol_p_high", 0.70))
                     for day in trading_days:
+                        if day < limited_start:
+                            continue
                         df_day = filter_date(df, day)
                         if df_day.empty:
                             missing_data_days.append(day)
@@ -314,9 +325,7 @@ def render_history():
         st.subheader(f"Saved Summary for {s.date} ({s.symbol})")
     else:
         # Fetch data covering the requested date and compute on the fly
-        today = dt.datetime.now().date()
-        days_needed = max(1, (today - selected_date).days + 1)
-        df, used_ticker = fetch_intraday_ohlcv(symbol, lookback_days=days_needed + 1)
+        df, used_ticker = fetch_intraday_ohlcv(symbol, lookback_days=selected_date)
         df_day = filter_date(df, selected_date)
         if df_day.empty:
             st.info("No live market data available for the selected date.")

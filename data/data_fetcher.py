@@ -19,7 +19,7 @@ def _map_to_yahoo_candidates(symbol: str) -> list:
 
 def fetch_intraday_ohlcv(
     symbol: str,
-    lookback_days: Union[int, dt.date] = 5,
+    lookback_days: Union[int, dt.date, Tuple[dt.date, dt.date]] = 5,
 ) -> Tuple[pd.DataFrame, str]:
     """Fetch intraday OHLCV using yfinance.
 
@@ -30,13 +30,18 @@ def fetch_intraday_ohlcv(
 
     - When `lookback_days` is an int, it is treated as a lookback in days.
     - When `lookback_days` is a date, the function fetches that calendar day.
+    - When `lookback_days` is a (start_date, end_date) tuple, it fetches that range.
     """
     try:
         import yfinance as yf  # type: ignore
 
         start = end = None
         period = None
-        if isinstance(lookback_days, dt.date) and not isinstance(lookback_days, dt.datetime):
+        if isinstance(lookback_days, tuple) and len(lookback_days) == 2:
+            start_date, end_date = lookback_days
+            start = dt.datetime.combine(start_date, dt.time(0, 0))
+            end = dt.datetime.combine(end_date + dt.timedelta(days=1), dt.time(0, 0))
+        elif isinstance(lookback_days, dt.date) and not isinstance(lookback_days, dt.datetime):
             start = dt.datetime.combine(lookback_days, dt.time(0, 0))
             end = start + dt.timedelta(days=1)
         else:
@@ -119,5 +124,10 @@ def fetch_intraday_ohlcv(
 
 
 def filter_date(df: pd.DataFrame, date: dt.date) -> pd.DataFrame:
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return pd.DataFrame(columns=df.columns if df is not None else [])
+    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+        df = df.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     mask = df["timestamp"].dt.date == date
     return df.loc[mask].copy()
