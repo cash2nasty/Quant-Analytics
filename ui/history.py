@@ -6,7 +6,7 @@ import streamlit as st
 from data.data_fetcher import fetch_intraday_ohlcv, filter_date
 from engines.sessions import compute_session_stats
 from engines.patterns import detect_patterns
-from engines.bias import build_bias, analyze_vwap_posture
+from engines.bias import build_bias, analyze_vwap_posture, anchored_vwap_anchor_times, build_anchored_vwap_rows
 from engines.accuracy import evaluate_bias_accuracy
 from engines.zones import build_htf_zones, summarize_zone_confluence, resample_ohlcv
 from engines.trade_suggestions import build_trade_suggestion
@@ -710,6 +710,25 @@ def render_history():
     if hasattr(b, "news_comment"):
         st.write(f"News Comment: {b.news_comment}")
     st.info(b.explanation)
+
+    st.markdown("### Anchored VWAP")
+    df_all = None
+    if df_prev is not None and not df_prev.empty and df_day is not None and not df_day.empty:
+        df_all = pd.concat([df_prev, df_day], ignore_index=True).sort_values("timestamp")
+    elif df_day is not None and not df_day.empty:
+        df_all = df_day.copy()
+    last_price = float(df_day["close"].iloc[-1]) if df_day is not None and not df_day.empty else None
+    atr_series = atr_like(df_day, length=20) if df_day is not None else pd.Series(dtype=float)
+    atr_value = float(atr_series.iloc[-1]) if len(atr_series) and pd.notna(atr_series.iloc[-1]) else None
+    anchor_times = anchored_vwap_anchor_times(df_prev, df_day, df_all)
+    rows = build_anchored_vwap_rows(df_all, anchor_times, last_price, atr_value)
+    if rows:
+        avwap_df = pd.DataFrame(rows)
+        avwap_df["Anchored VWAP"] = avwap_df["Anchored VWAP"].map(lambda x: f"{x:.2f}")
+        avwap_df["Distance (ATR)"] = avwap_df["Distance (ATR)"].map(lambda x: f"{x:.2f}")
+        st.dataframe(avwap_df, use_container_width=True)
+    else:
+        st.info("Anchored VWAP stats unavailable (need enough intraday data).")
 
 
     diagnostics = _compute_bias_diagnostics(df_day, df_prev, s.sessions, b, zone_confluence=zone_confluence)

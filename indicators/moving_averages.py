@@ -73,6 +73,35 @@ def compute_weekly_vwap(df: pd.DataFrame) -> pd.Series:
     return wvwap
 
 
+def compute_anchored_vwap(df: pd.DataFrame, anchor_ts: pd.Timestamp) -> pd.Series:
+    """Compute anchored VWAP starting from a specific timestamp."""
+    if df is None or df.empty or anchor_ts is None:
+        return pd.Series(dtype=float)
+
+    df = df.copy()
+
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+    elif isinstance(df.index, pd.DatetimeIndex):
+        df = df.reset_index()
+        df.rename(columns={df.columns[0]: "timestamp"}, inplace=True)
+    else:
+        raise ValueError("DataFrame must have a 'timestamp' column or a DatetimeIndex")
+
+    anchor_ts = pd.to_datetime(anchor_ts)
+    df = df[df["timestamp"] >= anchor_ts]
+    if df.empty:
+        return pd.Series(dtype=float)
+
+    tp = (df["high"] + df["low"] + df["close"]) / 3.0
+    tpv = tp * df["volume"]
+    cum_tpv = tpv.cumsum()
+    cum_vol = df["volume"].cumsum()
+    vwap = cum_tpv / cum_vol
+    vwap.index = df.index
+    return vwap
+
+
 def render_settings():
     """Compatibility placeholder for the settings UI (kept for backward compatibility)."""
     try:

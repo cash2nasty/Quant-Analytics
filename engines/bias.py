@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from indicators.moving_averages import compute_daily_vwap, compute_weekly_vwap
+from indicators.moving_averages import compute_daily_vwap, compute_weekly_vwap, compute_anchored_vwap
 from indicators.volatility import rolling_volatility, classify_volatility, atr_like
 from indicators.momentum import roc, trend_strength
 from indicators.volume import rvol
@@ -39,26 +39,30 @@ def analyze_vwap_posture(df_today: pd.DataFrame) -> VWAPPosture:
     if daily_above and weekly_above:
         comment = (
             "Price is above both daily and weekly VWAP (strong bullish posture). "
-            "Suggestion: watch for a retracement to daily/weekly VWAP and look for a hold; "
-            "if price opens and holds above, favor bullish continuation and a push through the next VWAP line."
+            "Suggestion: If price opens above daily VWAP, then a retracement to daily VWAP is the first check; "
+            "if it holds, then continuation can push away from weekly VWAP support. "
+            "If price opens below daily VWAP, then expect a deeper pullback toward weekly VWAP."
         )
     elif not daily_above and not weekly_above:
         comment = (
             "Price is below both daily and weekly VWAP (strong bearish posture). "
-            "Suggestion: watch for a retracement up to daily/weekly VWAP and look for rejection; "
-            "if price opens and holds below, favor bearish continuation and a push down through the next VWAP line."
+            "Suggestion: If price opens below daily VWAP, then a retracement up to daily VWAP is the first check; "
+            "if it rejects, then continuation can push away from weekly VWAP resistance. "
+            "If price opens above daily VWAP, then expect a deeper pullback toward weekly VWAP."
         )
     elif daily_above and not weekly_above:
         comment = (
             "Price is above daily but below weekly VWAP (short-term strength, long-term weakness). "
-            "Suggestion: look for a pullback to daily VWAP and a reclaim for upside continuation, "
-            "but expect weekly VWAP to act as a ceiling until price can reclaim it."
+            "Suggestion: If price opens above daily VWAP, then a retracement to daily VWAP is the first check; "
+            "if it holds, then continuation aims for a push through weekly VWAP. "
+            "If price opens below daily VWAP, then weekly VWAP remains the ceiling."
         )
     else:
         comment = (
             "Price is below daily but above weekly VWAP (short-term weakness, long-term strength). "
-            "Suggestion: look for a pullback to daily VWAP and a rejection for downside continuation, "
-            "but expect weekly VWAP to act as a floor unless price breaks below it."
+            "Suggestion: If price opens below daily VWAP, then a retracement to weekly VWAP is the first check; "
+            "if it holds, then continuation aims for a push through daily VWAP. "
+            "If price opens above daily VWAP, then daily VWAP may flip to support."
         )
 
     return VWAPPosture(
@@ -135,6 +139,142 @@ def _opening_range_signal(df_today: pd.DataFrame, minutes: int = 60) -> Tuple[st
     if last_price < or_low - tol:
         return "Bearish", or_high, or_low
     return "Neutral", or_high, or_low
+
+
+def _anchor_time_from_extreme(df: pd.DataFrame, column: str, mode: str) -> Optional[pd.Timestamp]:
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return None
+    if column not in df.columns:
+        return None
+    if mode == "max":
+        idx = df[column].idxmax()
+    else:
+        idx = df[column].idxmin()
+    if pd.isna(idx):
+        return None
+    return pd.to_datetime(df.loc[idx, "timestamp"])
+
+
+def _anchored_vwap_signal(
+    df_all: pd.DataFrame,
+    anchor_ts: Optional[pd.Timestamp],
+    last_price: Optional[float],
+    atr_value: Optional[float],
+    near_threshold: float = 0.8,
+    far_threshold: float = 1.6,
+) -> Tuple[str, Optional[float], Optional[float]]:
+    if anchor_ts is None or last_price is None or atr_value is None or atr_value <= 0:
+        return "Neutral", None, None
+    vwap = compute_anchored_vwap(df_all, anchor_ts)
+    if vwap is None or vwap.empty:
+        return "Neutral", None, None
+    last_vwap = float(vwap.iloc[-1])
+    distance_units = abs(last_price - last_vwap) / atr_value
+    if distance_units > far_threshold:
+        return "Far", last_vwap, distance_units
+    if last_price > last_vwap and distance_units <= near_threshold:
+        return "Bullish", last_vwap, distance_units
+    if last_price < last_vwap and distance_units <= near_threshold:
+        return "Bearish", last_vwap, distance_units
+    return "Neutral", last_vwap, distance_units
+
+
+def anchored_vwap_anchor_times(
+    df_prev: Optional[pd.DataFrame],
+    df_today: Optional[pd.DataFrame],
+    df_all: Optional[pd.DataFrame],
+) -> Dict[str, Optional[pd.Timestamp]]:
+    anchors: Dict[str, Optional[pd.Timestamp]] = {
+        "Prior Day High": None,
+        "Prior Day Low": None,
+        "Overnight High": None,
+        "Overnight Low": None,
+        "US Open 30m High": None,
+        "US Open 30m Low": None,
+    }
+
+    if df_prev is not None and not df_prev.empty:
+        anchors["Prior Day High"] = _anchor_time_from_extreme(df_prev, "high", "max")
+        anchors["Prior Day Low"] = _anchor_time_from_extreme(df_prev, "low", "min")
+
+    if df_all is not None and not df_all.empty and df_today is not None and not df_today.empty:
+        day = pd.to_datetime(df_today["timestamp"].iloc[-1]).date()
+        overnight_start = pd.Timestamp.combine(day - pd.Timedelta(days=1), pd.Timestamp("18:00").time())
+        overnight_end = pd.Timestamp.combine(day, pd.Timestamp("09:30").time())
+        overnight_df = df_all[
+            (df_all["timestamp"] >= overnight_start)
+            & (df_all["timestamp"] <= overnight_end)
+        ]
+        if not overnight_df.empty:
+            anchors["Overnight High"] = _anchor_time_from_extreme(overnight_df, "high", "max")
+            anchors["Overnight Low"] = _anchor_time_from_extreme(overnight_df, "low", "min")
+
+        or_start = pd.Timestamp.combine(day, pd.Timestamp("09:30").time())
+        or_end = or_start + pd.Timedelta(minutes=30)
+        or_df = df_all[(df_all["timestamp"] >= or_start) & (df_all["timestamp"] <= or_end)]
+        if not or_df.empty:
+            anchors["US Open 30m High"] = _anchor_time_from_extreme(or_df, "high", "max")
+            anchors["US Open 30m Low"] = _anchor_time_from_extreme(or_df, "low", "min")
+
+    return anchors
+
+
+def build_anchored_vwap_rows(
+    df_all: Optional[pd.DataFrame],
+    anchor_times: Dict[str, Optional[pd.Timestamp]],
+    last_price: Optional[float],
+    atr_value: Optional[float],
+    near_threshold: float = 0.8,
+    far_threshold: float = 1.6,
+) -> List[Dict[str, object]]:
+    if df_all is None or df_all.empty or last_price is None or atr_value is None or atr_value <= 0:
+        return []
+
+    rows: List[Dict[str, object]] = []
+    for name, anchor_ts in anchor_times.items():
+        if anchor_ts is None:
+            continue
+        label, last_vwap, distance_units = _anchored_vwap_signal(
+            df_all,
+            anchor_ts,
+            last_price,
+            atr_value,
+            near_threshold=near_threshold,
+            far_threshold=far_threshold,
+        )
+        if last_vwap is None or distance_units is None:
+            continue
+
+        if label == "Bullish":
+            relation = "Above"
+            suggestion = "If price retraces, expect support near this anchored VWAP. Likely bullish defense or continuation."
+            activity = "Bullish"
+        elif label == "Bearish":
+            relation = "Below"
+            suggestion = "If price retraces up, expect resistance near this anchored VWAP. Likely bearish defense or continuation."
+            activity = "Bearish"
+        elif label == "Far":
+            relation = "Far"
+            suggestion = "Price is stretched far from this anchored VWAP; mean-revert risk is higher. Likely snap-back or pause."
+            activity = "MeanRevert"
+        else:
+            relation = "Near"
+            suggestion = "Price is near this anchored VWAP; direction is less clear. Likely balance or chop."
+            activity = "Neutral"
+
+        rows.append(
+            {
+                "Anchor": name,
+                "Anchor Time": anchor_ts.strftime("%Y-%m-%d %H:%M"),
+                "Anchored VWAP": float(last_vwap),
+                "Price vs VWAP": relation,
+                "Distance (ATR)": float(distance_units),
+                "Likely Activity": activity,
+                "Suggestion": suggestion,
+            }
+        )
+
+    return rows
 
 
 def _premarket_signal(
@@ -607,6 +747,30 @@ def build_bias(
     # 5. VWAP posture
     vwap_posture = analyze_vwap_posture(df_today)
 
+    # Anchored VWAP signals
+    avwap_weight = 0.07
+    avwap_far_penalty = 0.05
+    last_price = None
+    atr_value = None
+    if df_today is not None and not df_today.empty:
+        last_price = float(df_today["close"].iloc[-1])
+        atr_series = atr_like(df_today, length=20)
+        if len(atr_series) and pd.notna(atr_series.iloc[-1]):
+            atr_value = float(atr_series.iloc[-1])
+    elif df_prev is not None and not df_prev.empty:
+        last_price = float(df_prev["close"].iloc[-1])
+        atr_series = atr_like(df_prev, length=20)
+        if len(atr_series) and pd.notna(atr_series.iloc[-1]):
+            atr_value = float(atr_series.iloc[-1])
+
+    df_all = None
+    if df_prev is not None and not df_prev.empty and df_today is not None and not df_today.empty:
+        df_all = pd.concat([df_prev, df_today], ignore_index=True).sort_values("timestamp")
+    elif df_today is not None and not df_today.empty:
+        df_all = df_today.copy()
+    elif df_prev is not None and not df_prev.empty:
+        df_all = df_prev.copy()
+
     # 6. Overnight range position
     overnight_label = "n/a"
     overnight_high = None
@@ -626,6 +790,78 @@ def build_bias(
             overnight_label = "Below"
         else:
             overnight_label = "Inside"
+
+    # Anchors for US open bias (prior day + overnight highs/lows)
+    avwap_us_signals: List[str] = []
+    avwap_us_far = False
+    if df_all is not None and last_price is not None and atr_value is not None:
+        prev_high_ts = _anchor_time_from_extreme(df_prev, "high", "max") if df_prev is not None else None
+        prev_low_ts = _anchor_time_from_extreme(df_prev, "low", "min") if df_prev is not None else None
+
+        overnight_start = None
+        overnight_end = None
+        if df_today is not None and not df_today.empty and "timestamp" in df_today.columns:
+            day = pd.to_datetime(df_today["timestamp"].iloc[-1]).date()
+            overnight_start = pd.Timestamp.combine(day - pd.Timedelta(days=1), pd.Timestamp("18:00").time())
+            overnight_end = pd.Timestamp.combine(day, pd.Timestamp("09:30").time())
+
+        overnight_df = None
+        if overnight_start is not None and overnight_end is not None and df_all is not None:
+            overnight_df = df_all[
+                (df_all["timestamp"] >= overnight_start)
+                & (df_all["timestamp"] <= overnight_end)
+            ]
+        overnight_high_ts = _anchor_time_from_extreme(overnight_df, "high", "max") if overnight_df is not None else None
+        overnight_low_ts = _anchor_time_from_extreme(overnight_df, "low", "min") if overnight_df is not None else None
+
+        for anchor_ts in (prev_high_ts, prev_low_ts, overnight_high_ts, overnight_low_ts):
+            label, _, dist_units = _anchored_vwap_signal(df_all, anchor_ts, last_price, atr_value)
+            if label == "Far":
+                avwap_us_far = True
+            elif label in ("Bullish", "Bearish"):
+                avwap_us_signals.append(label)
+
+    # Anchors for daily bias (prior day + overnight + US open range)
+    avwap_daily_signals: List[str] = []
+    avwap_daily_far = False
+    if df_all is not None and last_price is not None and atr_value is not None:
+        or_start = None
+        or_end = None
+        if df_today is not None and not df_today.empty and "timestamp" in df_today.columns:
+            day = pd.to_datetime(df_today["timestamp"].iloc[-1]).date()
+            or_start = pd.Timestamp.combine(day, pd.Timestamp("09:30").time())
+            or_end = or_start + pd.Timedelta(minutes=30)
+        or_df = None
+        if or_start is not None and or_end is not None and df_all is not None:
+            or_df = df_all[(df_all["timestamp"] >= or_start) & (df_all["timestamp"] <= or_end)]
+        or_high_ts = _anchor_time_from_extreme(or_df, "high", "max") if or_df is not None else None
+        or_low_ts = _anchor_time_from_extreme(or_df, "low", "min") if or_df is not None else None
+
+        prev_high_ts = _anchor_time_from_extreme(df_prev, "high", "max") if df_prev is not None else None
+        prev_low_ts = _anchor_time_from_extreme(df_prev, "low", "min") if df_prev is not None else None
+
+        overnight_start = None
+        overnight_end = None
+        if df_today is not None and not df_today.empty and "timestamp" in df_today.columns:
+            day = pd.to_datetime(df_today["timestamp"].iloc[-1]).date()
+            overnight_start = pd.Timestamp.combine(day - pd.Timedelta(days=1), pd.Timestamp("18:00").time())
+            overnight_end = pd.Timestamp.combine(day, pd.Timestamp("09:30").time())
+
+        overnight_df = None
+        if overnight_start is not None and overnight_end is not None and df_all is not None:
+            overnight_df = df_all[
+                (df_all["timestamp"] >= overnight_start)
+                & (df_all["timestamp"] <= overnight_end)
+            ]
+        overnight_high_ts = _anchor_time_from_extreme(overnight_df, "high", "max") if overnight_df is not None else None
+        overnight_low_ts = _anchor_time_from_extreme(overnight_df, "low", "min") if overnight_df is not None else None
+
+        for anchor_ts in (prev_high_ts, prev_low_ts, overnight_high_ts, overnight_low_ts, or_high_ts, or_low_ts):
+            label, _, dist_units = _anchored_vwap_signal(df_all, anchor_ts, last_price, atr_value)
+            if label == "Far":
+                avwap_daily_far = True
+            elif label in ("Bullish", "Bearish"):
+                avwap_daily_signals.append(label)
 
     # 7. Volatility regime
     vol_series = rolling_volatility(df_today["close"], length=20)
@@ -709,6 +945,16 @@ def build_bias(
     if daily_bias == us_open_bias:
         daily_conf += 0.1
 
+    # Anchored VWAP (daily)
+    if avwap_daily_signals:
+        avwap_daily_bias = max(set(avwap_daily_signals), key=avwap_daily_signals.count)
+        if daily_bias == avwap_daily_bias:
+            daily_conf += avwap_weight
+        else:
+            daily_conf -= avwap_weight
+    if avwap_daily_far:
+        daily_conf -= avwap_far_penalty
+
     # Overnight range alignment
     if overnight_label == "Above" and daily_bias == "Bullish":
         daily_conf += 0.05
@@ -790,6 +1036,17 @@ def build_bias(
     elif last_rvol < 0.8:
         daily_conf -= 0.05
 
+    # Anchored VWAP (US open confidence mirror)
+    if avwap_us_signals:
+        avwap_us_bias = max(set(avwap_us_signals), key=avwap_us_signals.count)
+        if us_open_bias in ("Bullish", "Bearish"):
+            if us_open_bias == avwap_us_bias:
+                us_conf += avwap_weight
+            else:
+                us_conf -= avwap_weight
+    if avwap_us_far:
+        us_conf -= avwap_far_penalty
+
     # News tone (modifier only)
     if news_signal.tone == "risk_on" and daily_bias == "Bullish":
         daily_conf += 0.05
@@ -868,7 +1125,7 @@ def build_bias(
 
     # Clamp
     daily_conf = max(0.1, min(0.95, daily_conf))
-    us_conf = daily_conf  # for now, mirror daily confidence
+    us_conf = max(0.1, min(0.95, us_conf))
 
     impact_notes = [
         "Session weighting favors larger-range sessions over quieter ones.",
@@ -896,6 +1153,11 @@ def build_bias(
         impact_notes.append("Trend regime: continuation signals weighted higher.")
     elif regime == "MeanRevert":
         impact_notes.append("Mean-revert regime: fade risk higher on extremes.")
+
+    if avwap_daily_signals:
+        impact_notes.append("Anchored VWAP aligned with daily bias for fair-value context.")
+    if avwap_daily_far:
+        impact_notes.append("Price stretched far from anchored VWAP: mean-revert risk higher.")
 
     if pre_us_open_bias in ("Bullish", "Bearish"):
         impact_notes.append(
@@ -969,7 +1231,7 @@ def build_bias(
         )
 
     daily_conf = max(0.1, min(0.95, daily_conf))
-    us_conf = daily_conf
+    us_conf = max(0.1, min(0.95, us_conf))
 
     return BiasSummary(
         daily_bias=final_bias,

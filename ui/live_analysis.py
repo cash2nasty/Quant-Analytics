@@ -13,7 +13,7 @@ from data.data_fetcher import fetch_intraday_ohlcv
 from data.session_reference import get_session_windows_for_date
 from engines.sessions import compute_session_stats
 from engines.patterns import detect_patterns
-from engines.bias import build_bias
+from engines.bias import build_bias, anchored_vwap_anchor_times, build_anchored_vwap_rows
 from engines.accuracy import evaluate_bias_accuracy
 from engines.zones import (
     build_htf_zones,
@@ -26,7 +26,7 @@ from engines.zones import (
 )
 from indicators.moving_averages import compute_daily_vwap, compute_weekly_vwap
 from indicators.statistics import zscore
-from indicators.volatility import rolling_volatility
+from indicators.volatility import rolling_volatility, atr_like
 from indicators.momentum import roc, trend_strength
 from indicators.volume import rvol
 from storage.history_manager import (
@@ -762,6 +762,25 @@ def main():
                 stance = "bullish" if last_price > last_sma50 else "bearish"
                 st.caption(f"Price is {'above' if last_price > last_sma50 else 'below'} SMA50 ({stance}).")
                 st.caption("Key: above SMA50 = bullish bias; below = bearish; near = neutral.")
+
+        st.markdown("#### Anchored VWAP")
+        df_all = None
+        if df_prev is not None and not df_prev.empty:
+            df_all = pd.concat([df_prev, df_today], ignore_index=True).sort_values("timestamp")
+        else:
+            df_all = df_today.copy()
+        last_price = float(df_today["close"].iloc[-1]) if len(df_today) else None
+        atr_series = atr_like(df_today, length=20)
+        atr_value = float(atr_series.iloc[-1]) if len(atr_series) and pd.notna(atr_series.iloc[-1]) else None
+        anchor_times = anchored_vwap_anchor_times(df_prev, df_today, df_all)
+        rows = build_anchored_vwap_rows(df_all, anchor_times, last_price, atr_value)
+        if rows:
+            avwap_df = pd.DataFrame(rows)
+            avwap_df["Anchored VWAP"] = avwap_df["Anchored VWAP"].map(lambda x: f"{x:.2f}")
+            avwap_df["Distance (ATR)"] = avwap_df["Distance (ATR)"].map(lambda x: f"{x:.2f}")
+            st.dataframe(avwap_df, use_container_width=True)
+        else:
+            st.info("Anchored VWAP stats unavailable (need enough intraday data).")
 
     if has_today_data:
         # Indicators / statistics
