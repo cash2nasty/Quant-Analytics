@@ -1,0 +1,88 @@
+{
+  "date": "2026-01-22",
+  "symbol": "NQH26",
+  "sessions": {
+    "Asia": {
+      "name": "Asia",
+      "high": 25602.5,
+      "low": 25527.75,
+      "open": 25553.0,
+      "close": 25542.25,
+      "range": 74.75,
+      "volume": 22716.0
+    },
+    "London": {
+      "name": "London",
+      "high": 25715.75,
+      "low": 25583.0,
+      "open": 25587.75,
+      "close": 25706.25,
+      "range": 132.75,
+      "volume": 40151.0
+    },
+    "US": {
+      "name": "US",
+      "high": 25731.75,
+      "low": 25536.75,
+      "open": 25729.0,
+      "close": 25637.25,
+      "range": 195.0,
+      "volume": 412066.0
+    }
+  },
+  "patterns": {
+    "london_breakout": false,
+    "whipsaw": true,
+    "trend_day": false,
+    "volatility_expansion": false,
+    "notes": "London and US moved in opposite directions (Whipsaw). Failed ORB 30m favors bullish. VWAP bearish reclaim/reject.",
+    "asia_range_hold": false,
+    "asia_range_sweep": false,
+    "asia_range_sweep_bias": "Neutral",
+    "london_continuation": false,
+    "london_continuation_bias": "Neutral",
+    "us_open_gap_fill": false,
+    "us_open_gap_fill_bias": "Neutral",
+    "orb_30": false,
+    "orb_30_bias": "Neutral",
+    "orb_60": false,
+    "orb_60_bias": "Neutral",
+    "failed_orb_30": true,
+    "failed_orb_30_bias": "Bullish",
+    "failed_orb_60": false,
+    "failed_orb_60_bias": "Neutral",
+    "power_hour_trend": false,
+    "power_hour_bias": "Neutral",
+    "vwap_reclaim_reject": true,
+    "vwap_reclaim_reject_bias": "Bearish"
+  },
+  "bias": {
+    "daily_bias": "Bearish",
+    "daily_confidence": 0.8999999999999999,
+    "us_open_bias": "Bullish",
+    "us_open_confidence": 0.8999999999999999,
+    "explanation": "Daily Bias is Bullish based on previous day (Bullish), Asia (Bearish), and London (Bullish) with bayesian equal-weight update. US Open Bias is Bullish (30m) / Bullish (60m). Overnight range position is Above. Gap is small up. HTF slope bias is Neutral. Day type is Chop. Regime is MeanRevert / HMM Mixed. Event risk is none. Volatility regime is 'compressed', momentum and ROC aligned at 0.000, RVOL at 0.92. Kalman slope at 0.5004. Bayes prob 0.75 from equal weights. News tone is neutral and only adjusts confidence, not direction. Day impact: Session weighting favors larger-range sessions over quieter ones. ATR-scaled thresholds reduce false bias on quiet days. US open above overnight range favors trend continuation. Chop day detected: bias kept but confidence reduced. Mean-revert regime: fade risk higher on extremes. Premarket bias (09:10 ET) uses overnight range, gap, VWAP, and premarket trend. HTF zones suggest Bearish bias (score -4.60; Bullish zones: 12, Bearish zones: 17.).",
+    "vwap_comment": "Price is above both daily and weekly VWAP (strong bullish posture). Suggestion: watch for a retracement to daily/weekly VWAP and look for a hold; if price opens and holds above, favor bullish continuation and a push through the next VWAP line.",
+    "news_comment": "ForexFactory: neutral (No major high-impact events dominating today's tone.) | SeekingAlpha: neutral (Macro commentary is mixed; no strong risk-on/off consensus.). News tone adjusts bias confidence but does not override session structure.",
+    "us_open_bias_30": "Bullish",
+    "us_open_confidence_30": 0.8999999999999999,
+    "us_open_bias_60": "Bullish",
+    "us_open_confidence_60": 0.8999999999999999,
+    "amd_summary": "Sweep neutral; London close outsidehigh"
+  },
+  "trade_suggestion": {
+    "action": "Don't Trade",
+    "rationale": "Daily Bias is Bearish but US Open Bias is Bullish, indicating conflict between sessions. When higher-timeframe and US session structure disagree, the safest choice is not to trade. VWAP cue: watch for a retracement to daily/weekly VWAP and look for a hold; if price opens and holds above, favor bullish continuation and a push through the next VWAP line."
+  },
+  "accuracy": {
+    "actual_direction": "Bullish",
+    "bias_correct": false,
+    "explanation": "Daily Bias was Bearish, but the market closed Bullish. The bias did not match the actual outcome; review session structure, VWAP posture, and news context for this day.",
+    "used_bias": "Daily",
+    "us_open_bias_correct": true,
+    "us_open_bias_correct_30": false,
+    "us_open_bias_correct_60": false
+  },
+  "day_high": 25739.75,
+  "day_low": 25483.75
+}

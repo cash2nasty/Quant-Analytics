@@ -1,4 +1,5 @@
 import datetime as dt
+import numpy as np
 import pandas as pd
 import altair as alt
 import streamlit as st
@@ -33,6 +34,21 @@ from storage.history_manager import (
     DaySummary,
     save_day_summary,
     load_all_summaries,
+)
+from engines.manifold import (
+    apply_standardization,
+    build_feature_matrix,
+    build_session_feature_vector,
+    cluster_labels,
+    describe_regimes,
+    isomap_embedding,
+    kmeans_fit,
+    kmeans_predict,
+    nearest_neighbors,
+    pca_embedding,
+    spd_covariance_from_intraday,
+    spd_log_euclidean_distance,
+    standardize_features,
 )
 
 try:
@@ -905,6 +921,81 @@ def main():
             st.info(
                 f"Based on these confluences and indicators, price looks {overall_bias.lower()}."
             )
+
+    st.markdown("### Regime & Manifold Similarity")
+    explain = describe_regimes(2)
+    st.info(explain["regime_meaning"])
+    st.caption(explain["isomap"])
+    st.caption(explain["pca"])
+    st.caption(explain["spd"])
+    summaries = load_all_summaries()
+    history = [s for s in summaries if s.symbol == symbol]
+    current_vec = build_session_feature_vector(sessions)
+    if not history or current_vec is None:
+        st.info("Need saved history and session stats to compute regime clustering.")
+    else:
+        X_hist, labels = build_feature_matrix(history)
+        if X_hist.size == 0:
+            st.info("No usable historical session vectors found for regime clustering.")
+        else:
+            X_hist_scaled, mean, std = standardize_features(X_hist)
+            current_scaled = apply_standardization(current_vec.reshape(1, -1), mean, std)
+            k = int(max(2, min(4, round(np.sqrt(len(X_hist_scaled))))))
+            explain = describe_regimes(k)
+            st.caption(explain["regime_labels"])
+            centroids = kmeans_fit(X_hist_scaled, k)
+            if centroids.size:
+                hist_clusters = kmeans_predict(X_hist_scaled, centroids)
+                current_cluster = int(kmeans_predict(current_scaled, centroids)[0])
+                cluster_size = int((hist_clusters == current_cluster).sum())
+                st.metric("Regime Cluster", f"Regime {current_cluster + 1}")
+                st.caption(f"Cluster size: {cluster_size}/{len(X_hist_scaled)} saved days.")
+                cluster_map = cluster_labels(labels, hist_clusters)
+                same_regime = cluster_map.get(current_cluster, [])
+                if same_regime:
+                    with st.expander("Days in the same regime"):
+                        st.write(", ".join(same_regime))
+
+            labels_all = labels + ["Current"]
+            X_all = np.vstack([X_hist_scaled, current_scaled])
+
+            isomap_emb = isomap_embedding(X_all, n_components=2, n_neighbors=5)
+            isomap_neighbors = nearest_neighbors(isomap_emb, labels_all, target_index=len(labels_all) - 1, k=3)
+            if isomap_neighbors:
+                st.markdown("**Isomap Nearest Days**")
+                st.dataframe(
+                    pd.DataFrame(
+                        [{"Day": n.label, "Distance": f"{n.distance:.4f}"} for n in isomap_neighbors]
+                    ),
+                    use_container_width=True,
+                )
+            else:
+                st.info("Isomap neighbors unavailable (need scikit-learn and multiple saved days).")
+
+            pca_emb = pca_embedding(X_all, n_components=2)
+            pca_neighbors = nearest_neighbors(pca_emb, labels_all, target_index=len(labels_all) - 1, k=3)
+            if pca_neighbors:
+                st.markdown("**Linear Autoencoder (PCA) Nearest Days**")
+                st.dataframe(
+                    pd.DataFrame(
+                        [{"Day": n.label, "Distance": f"{n.distance:.4f}"} for n in pca_neighbors]
+                    ),
+                    use_container_width=True,
+                )
+            else:
+                st.info("PCA neighbors unavailable (need scikit-learn and multiple saved days).")
+
+    spd_curr = spd_covariance_from_intraday(df_today) if has_today_data else None
+    spd_prev = spd_covariance_from_intraday(df_prev) if df_prev is not None else None
+    if spd_curr is not None and spd_prev is not None:
+        spd_dist = spd_log_euclidean_distance(spd_curr, spd_prev)
+        if spd_dist is not None:
+            st.write(f"SPD distance vs prior day: {spd_dist:.4f}")
+            st.caption("Lower distance = more similar intraday covariance structure.")
+        else:
+            st.info("SPD distance unavailable due to shape mismatch.")
+    else:
+        st.info("SPD distance unavailable (need enough intraday bars for both days).")
 
     # Accuracy: only compute for past dates
     if bias is None:

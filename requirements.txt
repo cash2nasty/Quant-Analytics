@@ -3,3 +3,4 @@ pandas
 numpy
 altair
 yfinance
+scikit-learn

@@ -35,27 +35,53 @@
     "whipsaw": false,
     "trend_day": true,
     "volatility_expansion": false,
-    "notes": "London and US aligned directionally with strong ranges (Trend Day)."
+    "notes": "London and US aligned directionally with strong ranges (Trend Day). London broke Asia high and US continued higher (London Continuation). ORB 30m confirmed bullish. ORB 60m confirmed bullish. VWAP bullish reclaim/reject.",
+    "asia_range_hold": false,
+    "asia_range_sweep": false,
+    "asia_range_sweep_bias": "Neutral",
+    "london_continuation": true,
+    "london_continuation_bias": "Bullish",
+    "us_open_gap_fill": false,
+    "us_open_gap_fill_bias": "Neutral",
+    "orb_30": true,
+    "orb_30_bias": "Bullish",
+    "orb_60": true,
+    "orb_60_bias": "Bullish",
+    "failed_orb_30": false,
+    "failed_orb_30_bias": "Neutral",
+    "failed_orb_60": false,
+    "failed_orb_60_bias": "Neutral",
+    "power_hour_trend": false,
+    "power_hour_bias": "Neutral",
+    "vwap_reclaim_reject": true,
+    "vwap_reclaim_reject_bias": "Bullish"
   },
   "bias": {
-    "daily_bias": "Bearish",
+    "daily_bias": "Bullish",
     "daily_confidence": 0.6759999999999999,
     "us_open_bias": "Bullish",
     "us_open_confidence": 0.6759999999999999,
-    "explanation": "Daily Bias is Bearish based on previous day (Bearish), Asia (Bullish), and London (Bullish) with weighted by session range. US Open Bias is Bullish. Overnight range position is Inside. Gap is small down. HTF slope bias is n/a. Volatility regime is 'normal', momentum and ROC aligned at -0.002, RVOL at 0.26. News tone is neutral and only adjusts confidence, not direction. Day impact: Session weighting favors larger-range sessions over quieter ones. ATR-scaled thresholds reduce false bias on quiet days. US open inside overnight range favors mean reversion early. HTF zones suggest Bullish bias (score 1.90; Bullish zones: 4, Bearish zones: 3.).",
-    "vwap_comment": "Price is above both daily and weekly VWAP (strong bullish posture).",
-    "news_comment": "ForexFactory: neutral (No major high-impact events dominating today's tone.) | SeekingAlpha: neutral (Macro commentary is mixed; no strong risk-on/off consensus.). News tone adjusts bias confidence but does not override session structure."
+    "explanation": "Daily Bias is Bullish based on previous day (Bearish), Asia (Bullish), and London (Bullish) with bayesian equal-weight update. US Open Bias is Bullish (30m) / Bullish (60m). Overnight range position is Inside. Gap is small down. HTF slope bias is n/a. Day type is Normal. Regime is Mixed / HMM MeanRevert. Event risk is none. Volatility regime is 'normal', momentum and ROC aligned at -0.002, RVOL at 0.26. Kalman slope at 3.8012. Bayes prob 0.68 from equal weights. News tone is neutral and only adjusts confidence, not direction. Day impact: Session weighting favors larger-range sessions over quieter ones. ATR-scaled thresholds reduce false bias on quiet days. US open inside overnight range favors mean reversion early. Premarket bias (09:10 ET) uses overnight range, gap, VWAP, and premarket trend. Daily bias confirmed after 10:45 ET by 60m OR (bullish). HMM regime detected: meanrevert state active. HTF zones suggest Bullish bias (score 1.90; Bullish zones: 4, Bearish zones: 3.).",
+    "vwap_comment": "Price is above both daily and weekly VWAP (strong bullish posture). Suggestion: watch for a retracement to daily/weekly VWAP and look for a hold; if price opens and holds above, favor bullish continuation and a push through the next VWAP line.",
+    "news_comment": "ForexFactory: neutral (No major high-impact events dominating today's tone.) | SeekingAlpha: neutral (Macro commentary is mixed; no strong risk-on/off consensus.). News tone adjusts bias confidence but does not override session structure.",
+    "us_open_bias_30": "Bullish",
+    "us_open_confidence_30": 0.6759999999999999,
+    "us_open_bias_60": "Bullish",
+    "us_open_confidence_60": 0.6759999999999999,
+    "amd_summary": "Sweep neutral; London close outsidehigh"
   },
   "trade_suggestion": {
-    "action": "Don't Trade",
-    "rationale": "Daily Bias is Bearish but US Open Bias is Bullish, indicating conflict between sessions. When higher-timeframe and US session structure disagree, the safest choice is not to trade."
+    "action": "Trade Small",
+    "rationale": "Daily Bias and US Open Bias are both Bullish, but confidence is moderate (0.68). There is some edge, but mixed conditions suggest reduced size."
   },
   "accuracy": {
     "actual_direction": "Bullish",
-    "bias_correct": false,
-    "explanation": "Daily Bias was Bearish, but the market closed Bullish. The bias did not match the actual outcome; review session structure, VWAP posture, and news context for this day.",
+    "bias_correct": true,
+    "explanation": "Daily Bias was Bullish and the market closed Bullish. The bias correctly anticipated the full-day direction.",
     "used_bias": "Daily",
-    "us_open_bias_correct": true
+    "us_open_bias_correct": true,
+    "us_open_bias_correct_30": true,
+    "us_open_bias_correct_60": true
   },
   "day_high": 25222.0,
   "day_low": 24239.75

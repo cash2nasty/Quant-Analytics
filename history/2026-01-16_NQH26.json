@@ -1,0 +1,88 @@
+{
+  "date": "2026-01-16",
+  "symbol": "NQH26",
+  "sessions": {
+    "Asia": {
+      "name": "Asia",
+      "high": 25820.25,
+      "low": 25731.0,
+      "open": 25741.0,
+      "close": 25806.5,
+      "range": 89.25,
+      "volume": 17307.0
+    },
+    "London": {
+      "name": "London",
+      "high": 25873.25,
+      "low": 25795.5,
+      "open": 25823.5,
+      "close": 25832.0,
+      "range": 77.75,
+      "volume": 26020.0
+    },
+    "US": {
+      "name": "US",
+      "high": 25891.0,
+      "low": 25591.5,
+      "open": 25868.0,
+      "close": 25687.25,
+      "range": 299.5,
+      "volume": 397115.0
+    }
+  },
+  "patterns": {
+    "london_breakout": false,
+    "whipsaw": true,
+    "trend_day": false,
+    "volatility_expansion": true,
+    "notes": "London and US moved in opposite directions (Whipsaw). US range expanded significantly vs London (Volatility Expansion). ORB 30m confirmed bearish. Failed ORB 30m favors bullish. Failed ORB 60m favors bullish. VWAP bearish reclaim/reject.",
+    "asia_range_hold": false,
+    "asia_range_sweep": false,
+    "asia_range_sweep_bias": "Neutral",
+    "london_continuation": false,
+    "london_continuation_bias": "Neutral",
+    "us_open_gap_fill": false,
+    "us_open_gap_fill_bias": "Neutral",
+    "orb_30": true,
+    "orb_30_bias": "Bearish",
+    "orb_60": false,
+    "orb_60_bias": "Neutral",
+    "failed_orb_30": true,
+    "failed_orb_30_bias": "Bullish",
+    "failed_orb_60": true,
+    "failed_orb_60_bias": "Bullish",
+    "power_hour_trend": false,
+    "power_hour_bias": "Neutral",
+    "vwap_reclaim_reject": true,
+    "vwap_reclaim_reject_bias": "Bearish"
+  },
+  "bias": {
+    "daily_bias": "Bullish",
+    "daily_confidence": 0.95,
+    "us_open_bias": "Bullish",
+    "us_open_confidence": 0.95,
+    "explanation": "Daily Bias is Bullish based on previous day (Bullish), Asia (Bullish), and London (Bullish) with bayesian equal-weight update. US Open Bias is Bullish (30m) / Bullish (60m). Overnight range position is Inside. Gap is small up. HTF slope bias is n/a. Day type is Normal. Regime is Mixed / HMM Mixed. Event risk is none. Volatility regime is 'normal', momentum and ROC aligned at 0.000, RVOL at 0.17. Kalman slope at -0.7937. Bayes prob 0.73 from equal weights. News tone is neutral and only adjusts confidence, not direction. Day impact: Session weighting favors larger-range sessions over quieter ones. ATR-scaled thresholds reduce false bias on quiet days. US open inside overnight range favors mean reversion early. Premarket bias (09:10 ET) uses overnight range, gap, VWAP, and premarket trend. HTF zones suggest Bullish bias (score 7.60; Bullish zones: 14, Bearish zones: 6.).",
+    "vwap_comment": "Price is below both daily and weekly VWAP (strong bearish posture). Suggestion: watch for a retracement up to daily/weekly VWAP and look for rejection; if price opens and holds below, favor bearish continuation and a push down through the next VWAP line.",
+    "news_comment": "ForexFactory: neutral (No major high-impact events dominating today's tone.) | SeekingAlpha: neutral (Macro commentary is mixed; no strong risk-on/off consensus.). News tone adjusts bias confidence but does not override session structure.",
+    "us_open_bias_30": "Bullish",
+    "us_open_confidence_30": 0.95,
+    "us_open_bias_60": "Bullish",
+    "us_open_confidence_60": 0.95,
+    "amd_summary": "Sweep neutral; London close outsidehigh"
+  },
+  "trade_suggestion": {
+    "action": "Trade",
+    "rationale": "Daily Bias and US Open Bias are both Bullish with high confidence (0.95). Sessions, VWAP posture, and supporting indicators align\u2014this is a day to trade in the direction of the bias."
+  },
+  "accuracy": {
+    "actual_direction": "Bearish",
+    "bias_correct": false,
+    "explanation": "Daily Bias was Bullish, but the market closed Bearish. The bias did not match the actual outcome; review session structure, VWAP posture, and news context for this day.",
+    "used_bias": "Daily",
+    "us_open_bias_correct": false,
+    "us_open_bias_correct_30": false,
+    "us_open_bias_correct_60": false
+  },
+  "day_high": 25891.0,
+  "day_low": 25591.5
+}
