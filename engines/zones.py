@@ -355,6 +355,21 @@ def is_zone_touched(df: pd.DataFrame, zone: Zone) -> bool:
     return not touched.empty
 
 
+def is_fvg_inversed(df: pd.DataFrame, zone: Zone) -> bool:
+    if zone.kind != "fvg":
+        return False
+    if df is None or df.empty:
+        return False
+    after = df[df["timestamp"] > zone.start]
+    if after.empty:
+        return False
+    if zone.side == "bullish":
+        return bool((after["close"] < zone.low).any())
+    if zone.side == "bearish":
+        return bool((after["close"] > zone.high).any())
+    return False
+
+
 def filter_untouched_zones(df: pd.DataFrame, zones: List[Zone]) -> List[Zone]:
     untouched: List[Zone] = []
     for zone in zones:

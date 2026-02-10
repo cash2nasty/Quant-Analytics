@@ -9,6 +9,7 @@ from data.data_fetcher import fetch_intraday_ohlcv, filter_date
 from engines.sessions import compute_session_stats
 from engines.patterns import detect_patterns
 from engines.bias import build_bias, analyze_vwap_posture, anchored_vwap_anchor_times, build_anchored_vwap_rows
+from engines.structure import detect_market_structure
 from engines.accuracy import evaluate_bias_accuracy
 from engines.zones import build_htf_zones, summarize_zone_confluence, resample_ohlcv
 from engines.trade_suggestions import build_trade_suggestion
@@ -712,6 +713,31 @@ def render_history():
     if hasattr(b, "news_comment"):
         st.write(f"News Comment: {b.news_comment}")
     st.info(b.explanation)
+
+    if df_day is not None and not df_day.empty:
+        st.markdown("### Market Structure (BOS)")
+        structure = detect_market_structure(df_day)
+        bos_time = structure.bos_time.strftime("%Y-%m-%d %H:%M") if structure.bos_time is not None else "n/a"
+        bos_level = f"{structure.bos_level:.2f}" if structure.bos_level is not None else "n/a"
+        bos_price = f"{structure.bos_price:.2f}" if structure.bos_price is not None else "n/a"
+        if structure.bos_1m == "Bullish":
+            bos_side = "Upside"
+        elif structure.bos_1m == "Bearish":
+            bos_side = "Downside"
+        else:
+            bos_side = "None"
+        structure_rows = [
+            {
+                "Timeframe": "1m",
+                "BOS Direction": bos_side,
+                "BOS Time": bos_time,
+                "BOS Level": bos_level,
+                "BOS Close": bos_price,
+                "15m Trend": structure.trend_15m,
+                "1m vs 15m": structure.alignment,
+            }
+        ]
+        st.dataframe(pd.DataFrame(structure_rows), use_container_width=True)
 
     st.markdown("### Anchored VWAP")
     df_all = None
