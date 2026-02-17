@@ -1,4 +1,5 @@
 import datetime as dt
+from typing import Optional
 import numpy as np
 import pandas as pd
 import altair as alt
@@ -54,10 +55,20 @@ from engines.manifold import (
 )
 
 try:
-    from engines.trade_suggestions import build_trade_suggestion
+    from engines.trade_suggestions import build_post_bias_guidance, build_trade_suggestion
 except Exception:
     def build_trade_suggestion(bias):
         return type("Suggestion", (), {"action": "HOLD", "rationale": "Trade suggestion module not available"})
+
+    def build_post_bias_guidance(*_args, **_kwargs):
+        return type(
+            "Guidance",
+            (),
+            {
+                "summary": "Post-bias guidance module not available.",
+                "bullets": [],
+            },
+        )
 
 
 def classify_range_size(curr_range: float, prev_range: float) -> str:
@@ -163,6 +174,56 @@ def _direction_label(value: float) -> str:
     if value < 0:
         return "Bearish"
     return "Neutral"
+
+
+def _range_location_label(price: float, midpoint: float) -> str:
+    if price > midpoint:
+        return "Premium"
+    if price < midpoint:
+        return "Discount"
+    return "Midpoint"
+
+
+def prior_day_range_location(df_today: pd.DataFrame, df_prev: pd.DataFrame) -> Optional[dict]:
+    if df_today is None or df_today.empty or df_prev is None or df_prev.empty:
+        return None
+    if "timestamp" not in df_today.columns:
+        return None
+
+    prev_high = float(df_prev["high"].max())
+    prev_low = float(df_prev["low"].min())
+    midpoint = (prev_high + prev_low) / 2.0
+
+    start_price = float(df_today["open"].iloc[0])
+    last_price = float(df_today["close"].iloc[-1])
+    start_label = _range_location_label(start_price, midpoint)
+    current_label = _range_location_label(last_price, midpoint)
+
+    cross_time = None
+    cross_to = None
+    prev_side = None
+    for ts, price in zip(df_today["timestamp"], df_today["close"]):
+        side = _range_location_label(float(price), midpoint)
+        if side == "Midpoint":
+            continue
+        if prev_side is None:
+            prev_side = side
+            continue
+        if side != prev_side:
+            cross_time = ts
+            cross_to = side
+            break
+        prev_side = side
+
+    return {
+        "prev_high": prev_high,
+        "prev_low": prev_low,
+        "midpoint": midpoint,
+        "start_label": start_label,
+        "current_label": current_label,
+        "cross_time": cross_time,
+        "cross_to": cross_to,
+    }
 
 
 def get_next_trading_day(date: dt.date) -> dt.date:
@@ -662,6 +723,36 @@ def main():
         st.write(f"AMD: {bias.amd_summary}")
     if getattr(bias, "explanation", None):
         st.info(bias.explanation)
+
+    location = prior_day_range_location(df_today, df_prev) if has_today_data else None
+    if location is not None:
+        st.markdown("### Prior Day Premium/Discount")
+        st.write(
+            f"Prior day range: {location['prev_low']:.2f} to {location['prev_high']:.2f} "
+            f"(midpoint {location['midpoint']:.2f})."
+        )
+        st.write(f"Day start: {location['start_label']}")
+        st.write(f"Current/Finish: {location['current_label']}")
+        if location["cross_time"] is not None:
+            cross_time = pd.to_datetime(location["cross_time"]).strftime("%Y-%m-%d %H:%M")
+            st.write(
+                f"Range flip: moved to {location['cross_to']} at {cross_time}."
+            )
+
+    guidance = build_post_bias_guidance(
+        bias,
+        sessions=sessions,
+        patterns=patterns,
+        zone_confluence=zone_confluence,
+        trend_bias=trend_bias,
+        df_today=df_today if has_today_data else None,
+        df_prev=df_prev,
+    )
+    st.markdown("### Post-Bias Entry Guidance")
+    st.write(getattr(guidance, "summary", ""))
+    guidance_bullets = getattr(guidance, "bullets", []) or []
+    if guidance_bullets:
+        st.markdown("\n".join(f"- {item}" for item in guidance_bullets))
 
     suggestion = build_trade_suggestion(bias)
     st.markdown("### Trade Suggestion")
