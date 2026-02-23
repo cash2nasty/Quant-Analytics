@@ -3,6 +3,8 @@ from typing import List, Optional
 
 import pandas as pd
 
+from indicators.momentum import trend_strength
+
 
 @dataclass
 class Zone:
@@ -360,7 +362,26 @@ def is_fvg_inversed(df: pd.DataFrame, zone: Zone) -> bool:
         return False
     if df is None or df.empty:
         return False
-    after = df[df["timestamp"] > zone.start]
+    rs = resample_ohlcv(df, _timeframe_rule(zone.timeframe))
+    if rs.empty:
+        return False
+    after = rs[rs["timestamp"] > zone.start]
+    if after.empty:
+        return False
+    if zone.side == "bullish":
+        return bool((after["close"] < zone.low).any())
+    if zone.side == "bearish":
+        return bool((after["close"] > zone.high).any())
+    return False
+
+
+def is_zone_failed(df: pd.DataFrame, zone: Zone) -> bool:
+    if df is None or df.empty:
+        return False
+    rs = resample_ohlcv(df, _timeframe_rule(zone.timeframe))
+    if rs.empty:
+        return False
+    after = rs[rs["timestamp"] > zone.start]
     if after.empty:
         return False
     if zone.side == "bullish":
@@ -393,3 +414,125 @@ def find_rejection_candles(df: pd.DataFrame, zone: Zone) -> List[pd.Timestamp]:
             if row["high"] >= zone.low and row["close"] < zone.low:
                 hits.append(row["timestamp"])
     return hits
+
+
+def _format_zone_label(zone: Zone) -> str:
+    return f"{zone.timeframe} {zone.side} {zone.kind} {zone.low:.2f}-{zone.high:.2f}"
+
+
+def _trend_bias_from_df(df: pd.DataFrame, length: int = 20) -> str:
+    if df is None or df.empty or "close" not in df.columns:
+        return "Neutral"
+    if len(df) < length:
+        return "Neutral"
+    try:
+        slope = float(trend_strength(df["close"], length=length))
+    except Exception:
+        return "Neutral"
+    if slope > 0:
+        return "Bullish"
+    if slope < 0:
+        return "Bearish"
+    return "Neutral"
+
+
+def summarize_zone_outlook(
+    df: pd.DataFrame,
+    zones: List[Zone],
+    last_price: Optional[float],
+    max_items: int = 3,
+) -> str:
+    if df is None or df.empty or not zones or last_price is None:
+        return "Zone outlook unavailable (need intraday data and zones)."
+
+    details = []
+    trend_bias = _trend_bias_from_df(df)
+    for z in zones:
+        touched = is_zone_touched(df, z)
+        inversed = is_fvg_inversed(df, z) if z.kind == "fvg" else False
+        failed = is_zone_failed(df, z) or inversed
+        rejection_hits = len(find_rejection_candles(df, z))
+        density, vol_score = zone_liquidity_scores(df, z)
+        liquidity_score = float(density * 0.2 + vol_score)
+        setup_score = score_zone_setup(
+            z,
+            last_price,
+            touched=touched,
+            liquidity_density=density,
+            volume_score=vol_score,
+        )
+        mid = (z.low + z.high) / 2.0
+        distance = abs(mid - last_price)
+        details.append(
+            {
+                "zone": z,
+                "touched": touched,
+                "failed": failed,
+                "rejection_hits": rejection_hits,
+                "liquidity_score": liquidity_score,
+                "setup_score": float(setup_score),
+                "distance": float(distance),
+            }
+        )
+
+    untouched = sorted(
+        [d for d in details if not d["touched"]],
+        key=lambda d: d["setup_score"],
+        reverse=True,
+    )
+    rejecting = [d for d in details if d["touched"] and d["rejection_hits"] > 0 and not d["failed"]]
+    failed = [d for d in details if d["failed"]]
+    liquidity_sorted = sorted(details, key=lambda d: d["liquidity_score"], reverse=True)
+
+    lines = []
+    if liquidity_sorted:
+        lines.append("- Highest liquidity zones:")
+        for item in liquidity_sorted[:max_items]:
+            zone = item["zone"]
+            label = _format_zone_label(zone)
+            touched = item["touched"]
+            failed = item["failed"]
+            rejection_hits = item["rejection_hits"]
+            aligns_with_trend = trend_bias == "Bullish" if zone.side == "bullish" else trend_bias == "Bearish"
+
+            if failed:
+                outcome = "Likely push through -> fail"
+            elif rejection_hits > 0 and aligns_with_trend:
+                outcome = "Likely reject -> continuation"
+            elif touched and not aligns_with_trend:
+                outcome = "Likely push through -> fail"
+            else:
+                outcome = "Likely reject -> continuation"
+
+            if zone.side == "bullish":
+                look_for = (
+                    "sweep prior lows into the zone, bullish displacement off the low, "
+                    "imbalance left behind, and a close back above the zone high"
+                )
+            else:
+                look_for = (
+                    "sweep prior highs into the zone, bearish displacement off the high, "
+                    "imbalance left behind, and a close back below the zone low"
+                )
+
+            touch_note = "Touched" if touched else "Untouched"
+            lines.append(f"  - {label} (liq {item['liquidity_score']:.2f}; {touch_note})")
+            lines.append(f"    - Expectation: {outcome}.")
+            lines.append(f"    - Look for: {look_for}. Fail if close through far edge.")
+    if untouched:
+        lines.append(f"- Likely next touches ({len(untouched)}):")
+        for item in untouched[:max_items]:
+            lines.append(f"  - {_format_zone_label(item['zone'])}")
+    if rejecting:
+        lines.append(f"- Rejecting zones ({len(rejecting)}):")
+        for item in rejecting[:max_items]:
+            lines.append(f"  - {_format_zone_label(item['zone'])}")
+    if failed:
+        lines.append(f"- Failed zones ({len(failed)}):")
+        for item in failed[:max_items]:
+            lines.append(f"  - {_format_zone_label(item['zone'])}")
+
+    if not lines:
+        return "No strong zone outlook yet."
+
+    return "\n".join(lines)

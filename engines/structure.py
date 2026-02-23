@@ -15,6 +15,10 @@ class StructureSummary:
     bos_time: Optional[pd.Timestamp]
     bos_price: Optional[float]
     bos_level: Optional[float]
+    choch_1m: str
+    choch_time: Optional[pd.Timestamp]
+    choch_price: Optional[float]
+    choch_level: Optional[float]
     alignment: str
 
 
@@ -45,17 +49,23 @@ def _find_swing_points(df: pd.DataFrame, window: int) -> Tuple[Dict[int, float],
     return swing_highs, swing_lows
 
 
-def _detect_last_bos(
+def _detect_last_bos_by_direction(
     df: pd.DataFrame,
     window: int = 3,
-) -> Tuple[str, Optional[pd.Timestamp], Optional[float], Optional[float]]:
+) -> Tuple[
+    Tuple[str, Optional[pd.Timestamp], Optional[float], Optional[float]],
+    Tuple[str, Optional[pd.Timestamp], Optional[float], Optional[float]],
+]:
     if df is None or df.empty:
-        return "None", None, None, None
+        empty = ("None", None, None, None)
+        return empty, empty
     required = {"timestamp", "high", "low", "close"}
     if not required.issubset(set(df.columns)):
-        return "None", None, None, None
+        empty = ("None", None, None, None)
+        return empty, empty
     if len(df) < (window * 2 + 2):
-        return "None", None, None, None
+        empty = ("None", None, None, None)
+        return empty, empty
 
     data = df.copy()
     data["timestamp"] = pd.to_datetime(data["timestamp"])
@@ -65,7 +75,8 @@ def _detect_last_bos(
 
     last_swing_high = None
     last_swing_low = None
-    last_bos = ("None", None, None, None)
+    last_bull = ("None", None, None, None)
+    last_bear = ("None", None, None, None)
 
     for i in range(1, len(data)):
         if i in swing_highs:
@@ -80,13 +91,36 @@ def _detect_last_bos(
         if last_swing_high is not None:
             level = last_swing_high[1]
             if prev_close <= level and close > level:
-                last_bos = ("Bullish", ts, close, level)
+                last_bull = ("Bullish", ts, close, level)
         if last_swing_low is not None:
             level = last_swing_low[1]
             if prev_close >= level and close < level:
-                last_bos = ("Bearish", ts, close, level)
+                last_bear = ("Bearish", ts, close, level)
 
-    return last_bos
+    return last_bull, last_bear
+
+
+def _pick_latest_event(
+    event_a: Tuple[str, Optional[pd.Timestamp], Optional[float], Optional[float]],
+    event_b: Tuple[str, Optional[pd.Timestamp], Optional[float], Optional[float]],
+) -> Tuple[str, Optional[pd.Timestamp], Optional[float], Optional[float]]:
+    time_a = event_a[1]
+    time_b = event_b[1]
+    if time_a is None and time_b is None:
+        return ("None", None, None, None)
+    if time_a is None:
+        return event_b
+    if time_b is None:
+        return event_a
+    return event_a if time_a >= time_b else event_b
+
+
+def _detect_last_bos(
+    df: pd.DataFrame,
+    window: int = 3,
+) -> Tuple[str, Optional[pd.Timestamp], Optional[float], Optional[float]]:
+    last_bull, last_bear = _detect_last_bos_by_direction(df, window=window)
+    return _pick_latest_event(last_bull, last_bear)
 
 
 def _trend_label_15m(df: pd.DataFrame, length: int = 10) -> str:
@@ -106,7 +140,15 @@ def _trend_label_15m(df: pd.DataFrame, length: int = 10) -> str:
 def detect_market_structure(df_1m: pd.DataFrame) -> StructureSummary:
     df_day = _filter_trading_day(df_1m)
     trend_15m = _trend_label_15m(df_day)
-    bos_dir, bos_time, bos_price, bos_level = _detect_last_bos(df_day, window=3)
+    last_bull, last_bear = _detect_last_bos_by_direction(df_day, window=3)
+    bos_dir, bos_time, bos_price, bos_level = _pick_latest_event(last_bull, last_bear)
+
+    if trend_15m == "Bullish":
+        choch_dir, choch_time, choch_price, choch_level = last_bear
+    elif trend_15m == "Bearish":
+        choch_dir, choch_time, choch_price, choch_level = last_bull
+    else:
+        choch_dir, choch_time, choch_price, choch_level = ("None", None, None, None)
 
     if bos_dir in ("Bullish", "Bearish") and trend_15m in ("Bullish", "Bearish"):
         alignment = "Aligned" if bos_dir == trend_15m else "Opposite"
@@ -119,5 +161,9 @@ def detect_market_structure(df_1m: pd.DataFrame) -> StructureSummary:
         bos_time=bos_time,
         bos_price=bos_price,
         bos_level=bos_level,
+        choch_1m=choch_dir,
+        choch_time=choch_time,
+        choch_price=choch_price,
+        choch_level=choch_level,
         alignment=alignment,
     )

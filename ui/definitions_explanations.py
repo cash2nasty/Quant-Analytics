@@ -136,7 +136,7 @@ def render_definitions_explanations() -> None:
         "often signaling a potential reversal."
     )
     st.markdown(
-        "The app detects BOS on the 1m chart using swing points and also reports 15m trend alignment."
+        "The app detects BOS and CHOCH on the 1m chart using swing points and also reports 15m trend alignment."
     )
 
     st.markdown("## Regime")

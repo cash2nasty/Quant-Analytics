@@ -20,10 +20,12 @@ from engines.accuracy import evaluate_bias_accuracy
 from engines.zones import (
     build_htf_zones,
     find_rejection_candles,
+    is_zone_failed,
     is_zone_touched,
     is_fvg_inversed,
     score_zone_setup,
     summarize_zone_confluence,
+    summarize_zone_outlook,
     zone_liquidity_scores,
     zone_size_points,
 )
@@ -601,8 +603,7 @@ def main():
     zone_confluence = summarize_zone_confluence(htf_zones, last_ref_price)
 
     zone_rejection_hits = 0
-    for z in htf_zones:
-        zone_rejection_hits += len(find_rejection_candles(df_sessions_source, z))
+    zone_outlook_summary = summarize_zone_outlook(df_sessions_source, htf_zones, last_ref_price)
 
     trend_bias = "Neutral"
     try:
@@ -626,14 +627,22 @@ def main():
         f"Confluence bias: {zone_confluence.bias} (points {zone_confluence.score:.2f})"
     )
     st.caption(zone_confluence.notes)
-    st.caption(
-        f"Rejection candles after zone formation: {zone_rejection_hits}."
-    )
 
     zone_rows = []
     for z in htf_zones:
         touched = is_zone_touched(df_sessions_source, z)
         inversed = is_fvg_inversed(df_sessions_source, z) if z.kind == "fvg" else None
+        failed = is_zone_failed(df_sessions_source, z) or inversed is True
+        rejection_hits = len(find_rejection_candles(df_sessions_source, z))
+        zone_rejection_hits += rejection_hits
+        if failed:
+            status = "Failed"
+        elif rejection_hits > 0:
+            status = "Rejecting"
+        elif touched:
+            status = "Touched"
+        else:
+            status = "Untouched"
         density, vol_score = zone_liquidity_scores(df_sessions_source, z)
         setup_score = score_zone_setup(
             z,
@@ -650,6 +659,9 @@ def main():
                 "Range": f"{z.low:.2f} - {z.high:.2f}",
                 "Size (pts)": zone_size_points(z),
                 "Touched": "Yes" if touched else "No",
+                "Status": status,
+                "Rejection Hits": int(rejection_hits),
+                "Failed": "Yes" if failed else "No",
                 "Inversed": "Yes" if inversed is True else "No" if inversed is False else "n/a",
                 "Liquidity Lines": float(density),
                 "Volume Intensity": float(vol_score),
@@ -659,7 +671,28 @@ def main():
         )
 
     if zone_rows:
+        st.caption(
+            f"Rejection candles after zone formation: {zone_rejection_hits}."
+        )
+
+    if zone_rows:
         zones_df = pd.DataFrame(zone_rows)
+        st.subheader("HTF Zone Outlook")
+        st.markdown(zone_outlook_summary)
+
+        untouched_df = zones_df[zones_df["Touched"] == "No"].sort_values(
+            "Setup Score", ascending=False
+        )
+        touched_df = zones_df[zones_df["Touched"] == "Yes"].sort_values(
+            "Setup Score", ascending=False
+        )
+
+        st.subheader("Untouched HTF Zones")
+        st.dataframe(untouched_df, use_container_width=True)
+
+        st.subheader("Touched HTF Zones")
+        st.dataframe(touched_df, use_container_width=True)
+
         if trend_bias == "Bullish":
             retracement = zones_df[zones_df["Side"] == "bearish"]
             continuation = zones_df[zones_df["Side"] == "bullish"]
@@ -723,6 +756,9 @@ def main():
         st.write(f"AMD: {bias.amd_summary}")
     if getattr(bias, "explanation", None):
         st.info(bias.explanation)
+    if zone_rows:
+        st.markdown("**HTF Zone Outlook**")
+        st.markdown(zone_outlook_summary)
 
     location = prior_day_range_location(df_today, df_prev) if has_today_data else None
     if location is not None:
@@ -760,7 +796,7 @@ def main():
     st.write(getattr(suggestion, "rationale", ""))
 
     if has_today_data:
-        st.markdown("### Market Structure (BOS)")
+        st.markdown("### Market Structure (BOS/CHOCH)")
         structure = detect_market_structure(df_today)
         bos_time = structure.bos_time.strftime("%Y-%m-%d %H:%M") if structure.bos_time is not None else "n/a"
         bos_level = f"{structure.bos_level:.2f}" if structure.bos_level is not None else "n/a"
@@ -771,6 +807,19 @@ def main():
             bos_side = "Downside"
         else:
             bos_side = "None"
+
+        choch_time = (
+            structure.choch_time.strftime("%Y-%m-%d %H:%M") if structure.choch_time is not None else "n/a"
+        )
+        choch_level = f"{structure.choch_level:.2f}" if structure.choch_level is not None else "n/a"
+        choch_price = f"{structure.choch_price:.2f}" if structure.choch_price is not None else "n/a"
+        if structure.choch_1m == "Bullish":
+            choch_side = "Upside"
+        elif structure.choch_1m == "Bearish":
+            choch_side = "Downside"
+        else:
+            choch_side = "None"
+
         structure_rows = [
             {
                 "Timeframe": "1m",
@@ -778,6 +827,10 @@ def main():
                 "BOS Time": bos_time,
                 "BOS Level": bos_level,
                 "BOS Close": bos_price,
+                "CHOCH Direction": choch_side,
+                "CHOCH Time": choch_time,
+                "CHOCH Level": choch_level,
+                "CHOCH Close": choch_price,
                 "15m Trend": structure.trend_15m,
                 "1m vs 15m": structure.alignment,
             }

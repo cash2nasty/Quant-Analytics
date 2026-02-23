@@ -11,7 +11,7 @@ from engines.patterns import detect_patterns
 from engines.bias import build_bias, analyze_vwap_posture, anchored_vwap_anchor_times, build_anchored_vwap_rows
 from engines.structure import detect_market_structure
 from engines.accuracy import evaluate_bias_accuracy
-from engines.zones import build_htf_zones, summarize_zone_confluence, resample_ohlcv
+from engines.zones import build_htf_zones, summarize_zone_confluence, summarize_zone_outlook, resample_ohlcv
 from engines.trade_suggestions import build_trade_suggestion
 from storage.history_manager import DaySummary, load_all_summaries, save_day_summary
 from indicators.volatility import atr_like
@@ -664,6 +664,7 @@ def render_history():
 
     df_sessions_source = None
     zone_confluence = None
+    zone_outlook_summary = None
     if df_day is not None and not df_day.empty:
         df_sessions_source = df_day
         if df_prev is not None and not df_prev.empty:
@@ -675,6 +676,8 @@ def render_history():
         htf_zones = build_htf_zones(df_sessions_source)
         last_price = float(df_sessions_source["close"].iloc[-1]) if not df_sessions_source.empty else None
         zone_confluence = summarize_zone_confluence(htf_zones, last_price)
+        if htf_zones:
+            zone_outlook_summary = summarize_zone_outlook(df_sessions_source, htf_zones, last_price)
 
     st.markdown("### Bias")
     b = s.bias
@@ -713,9 +716,12 @@ def render_history():
     if hasattr(b, "news_comment"):
         st.write(f"News Comment: {b.news_comment}")
     st.info(b.explanation)
+    if zone_outlook_summary:
+        st.markdown("**HTF Zone Outlook**")
+        st.markdown(zone_outlook_summary)
 
     if df_day is not None and not df_day.empty:
-        st.markdown("### Market Structure (BOS)")
+        st.markdown("### Market Structure (BOS/CHOCH)")
         structure = detect_market_structure(df_day)
         bos_time = structure.bos_time.strftime("%Y-%m-%d %H:%M") if structure.bos_time is not None else "n/a"
         bos_level = f"{structure.bos_level:.2f}" if structure.bos_level is not None else "n/a"
@@ -726,6 +732,19 @@ def render_history():
             bos_side = "Downside"
         else:
             bos_side = "None"
+
+        choch_time = (
+            structure.choch_time.strftime("%Y-%m-%d %H:%M") if structure.choch_time is not None else "n/a"
+        )
+        choch_level = f"{structure.choch_level:.2f}" if structure.choch_level is not None else "n/a"
+        choch_price = f"{structure.choch_price:.2f}" if structure.choch_price is not None else "n/a"
+        if structure.choch_1m == "Bullish":
+            choch_side = "Upside"
+        elif structure.choch_1m == "Bearish":
+            choch_side = "Downside"
+        else:
+            choch_side = "None"
+
         structure_rows = [
             {
                 "Timeframe": "1m",
@@ -733,6 +752,10 @@ def render_history():
                 "BOS Time": bos_time,
                 "BOS Level": bos_level,
                 "BOS Close": bos_price,
+                "CHOCH Direction": choch_side,
+                "CHOCH Time": choch_time,
+                "CHOCH Level": choch_level,
+                "CHOCH Close": choch_price,
                 "15m Trend": structure.trend_15m,
                 "1m vs 15m": structure.alignment,
             }
