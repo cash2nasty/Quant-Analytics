@@ -1,0 +1,88 @@
+{
+  "date": "2026-03-05",
+  "symbol": "NQH26",
+  "sessions": {
+    "Asia": {
+      "name": "Asia",
+      "high": 25250.0,
+      "low": 25019.0,
+      "open": 25171.0,
+      "close": 25039.0,
+      "range": 231.0,
+      "volume": 53009.0
+    },
+    "London": {
+      "name": "London",
+      "high": 25205.75,
+      "low": 24973.25,
+      "open": 25072.0,
+      "close": 25052.25,
+      "range": 232.5,
+      "volume": 66456.0
+    },
+    "US": {
+      "name": "US",
+      "high": 25209.75,
+      "low": 24772.5,
+      "open": 24987.75,
+      "close": 25034.0,
+      "range": 437.25,
+      "volume": 484695.0
+    }
+  },
+  "patterns": {
+    "london_breakout": false,
+    "whipsaw": true,
+    "trend_day": false,
+    "volatility_expansion": true,
+    "notes": "London swept Asia low and closed inside (Asia Range Sweep). London and US moved in opposite directions (Whipsaw). US range expanded significantly vs London (Volatility Expansion). ORB 30m confirmed bearish. ORB 60m confirmed bearish. Failed ORB 30m favors bullish. Power hour trend aligned bullish. VWAP bullish reclaim/reject.",
+    "asia_range_hold": false,
+    "asia_range_sweep": true,
+    "asia_range_sweep_bias": "Bullish",
+    "london_continuation": false,
+    "london_continuation_bias": "Neutral",
+    "us_open_gap_fill": false,
+    "us_open_gap_fill_bias": "Neutral",
+    "orb_30": true,
+    "orb_30_bias": "Bearish",
+    "orb_60": true,
+    "orb_60_bias": "Bearish",
+    "failed_orb_30": true,
+    "failed_orb_30_bias": "Bullish",
+    "failed_orb_60": false,
+    "failed_orb_60_bias": "Neutral",
+    "power_hour_trend": true,
+    "power_hour_bias": "Bullish",
+    "vwap_reclaim_reject": true,
+    "vwap_reclaim_reject_bias": "Bullish"
+  },
+  "bias": {
+    "daily_bias": "Bullish",
+    "daily_confidence": 0.7319999999999999,
+    "us_open_bias": "Bearish",
+    "us_open_confidence": 0.45,
+    "explanation": "Daily Bias is Bullish based on previous day (Bullish), Asia (Bearish), and London (Bearish) with weighted by session range. US Open Bias is Bearish (30m) / Bearish (60m). Overnight range position is Inside. Gap is small down. HTF slope bias is Bullish. Day type is Normal. Regime is MeanRevert / HMM Mixed. Event risk is none. Volatility regime is 'compressed', momentum and ROC aligned at -0.000, RVOL at 1.17. Kalman slope at 0.4981. Bayes prob 0.50 from equal weights. News tone is neutral and only adjusts confidence, not direction. Day impact: Session weighting favors larger-range sessions over quieter ones. ATR-scaled thresholds reduce false bias on quiet days. US open inside overnight range favors mean reversion early. HTF slope alignment supports follow-through; conflict adds chop risk. Mean-revert regime: fade risk higher on extremes. Price stretched far from anchored VWAP: mean-revert risk higher. Premarket bias (09:10 ET) uses overnight range, gap, VWAP, and premarket trend. AMD signal favors bullish distribution; London close inside. Patterns aligned with other confluences and tilted the bias. HTF zones suggest Bearish bias (score -1.30; Bullish zones: 18, Bearish zones: 19.).",
+    "vwap_comment": "Price is above both daily and weekly VWAP (strong bullish posture). Suggestion: If price opens above daily VWAP, then a retracement to daily VWAP is the first check; if it holds, then continuation can push away from weekly VWAP support. If price opens below daily VWAP, then expect a deeper pullback toward weekly VWAP.",
+    "news_comment": "ForexFactory: neutral (No major high-impact events dominating today's tone.) | SeekingAlpha: neutral (Macro commentary is mixed; no strong risk-on/off consensus.). News tone adjusts bias confidence but does not override session structure.",
+    "us_open_bias_30": "Bearish",
+    "us_open_confidence_30": 0.45,
+    "us_open_bias_60": "Bearish",
+    "us_open_confidence_60": 0.45,
+    "amd_summary": "Sweep bullish; London close inside"
+  },
+  "trade_suggestion": {
+    "action": "Don't Trade",
+    "rationale": "Daily Bias is Bullish but US Open Bias is Bearish, indicating conflict between sessions. When higher-timeframe and US session structure disagree, the safest choice is not to trade. VWAP cue: If price opens above daily VWAP, then a retracement to daily VWAP is the first check; if it holds, then continuation can push away from weekly VWAP support. If price opens below daily VWAP, then expect a deeper pullback toward weekly VWAP."
+  },
+  "accuracy": {
+    "actual_direction": "Bearish",
+    "bias_correct": false,
+    "explanation": "Daily Bias was Bullish, but the market closed Bearish. The bias did not match the actual outcome; review session structure, VWAP posture, and news context for this day.",
+    "used_bias": "Daily",
+    "us_open_bias_correct": true,
+    "us_open_bias_correct_30": false,
+    "us_open_bias_correct_60": true
+  },
+  "day_high": 25250.0,
+  "day_low": 24772.5
+}

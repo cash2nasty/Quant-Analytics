@@ -1221,57 +1221,53 @@ def main():
         st.markdown("### Daily Bias Accuracy")
         st.info("Trading day in progress — accuracy will be available after the day ends.")
 
+    is_day_finalized = effective_date < today or (effective_date == today and is_trading_day_done)
+
+    def _save_day_summary_if_missing(date_to_save: dt.date):
+        existing = [
+            s for s in load_all_summaries()
+            if s.date == str(date_to_save) and s.symbol == symbol
+        ]
+        if existing:
+            return False
+
+        if is_day_finalized and has_today_data:
+            source_df = df_sessions_source if df_sessions_source is not None else df_today
+            acc = evaluate_bias_accuracy(source_df, bias, trading_date=date_to_save)
+        else:
+            acc = None
+
+        day_summary = DaySummary(
+            date=str(date_to_save),
+            symbol=symbol,
+            sessions=sessions,
+            patterns=patterns,
+            bias=bias,
+            trade_suggestion=suggestion,
+            accuracy=acc,
+            day_high=day_high if has_today_data else None,
+            day_low=day_low if has_today_data else None,
+        )
+        save_day_summary(day_summary)
+        return True
+
     # Manual save
     if st.button("Save Today to History"):
         try:
-            if effective_date < today and has_today_data:
-                source_df = df_sessions_source if df_sessions_source is not None else df_today
-                acc = evaluate_bias_accuracy(source_df, bias, trading_date=effective_date)
+            saved = _save_day_summary_if_missing(effective_date)
+            if saved:
+                st.success("Saved current day summary to history.")
             else:
-                acc = None
-            day_summary = DaySummary(
-                date=str(effective_date),
-                symbol=symbol,
-                sessions=sessions,
-                patterns=patterns,
-                bias=bias,
-                trade_suggestion=suggestion,
-                accuracy=acc,
-                day_high=day_high if has_today_data else None,
-                day_low=day_low if has_today_data else None,
-            )
-            save_day_summary(day_summary)
-            st.success("Saved current day summary to history.")
+                st.info("This day is already saved for the selected symbol.")
         except Exception as e:
             st.error(f"Failed to save summary: {e}")
 
-    # Automatic archiving: if today is past and more than 1 hour since US close, save to history
+    # Automatic archiving: follows the same end-of-trading-day logic used above.
     try:
-        if (
-            selected_date == today
-            and not auto_advanced
-            and selected_windows
-            and "US" in selected_windows
-        ):
-            us_end = selected_windows["US"].get("end") if isinstance(selected_windows["US"], dict) else None
-            if us_end and now > us_end + dt.timedelta(hours=1):
-                saved = [s for s in load_all_summaries() if s.date == str(today) and s.symbol == symbol]
-                if not saved and has_today_data:
-                    source_df = df_sessions_source if df_sessions_source is not None else df_today
-                    acc = evaluate_bias_accuracy(source_df, bias, trading_date=today)
-                    day_summary = DaySummary(
-                        date=str(today),
-                        symbol=symbol,
-                        sessions=sessions,
-                        patterns=patterns,
-                        bias=bias,
-                        trade_suggestion=suggestion,
-                        accuracy=acc,
-                        day_high=day_high if has_today_data else None,
-                        day_low=day_low if has_today_data else None,
-                    )
-                    save_day_summary(day_summary)
-                    st.success("Trading day archived to history automatically.")
+        if has_today_data and is_day_finalized:
+            saved = _save_day_summary_if_missing(effective_date)
+            if saved:
+                st.success("Trading day archived to history automatically.")
     except Exception:
         pass
 
