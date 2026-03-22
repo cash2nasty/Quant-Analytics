@@ -2,6 +2,7 @@ import datetime as dt
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from data.data_fetcher import fetch_intraday_ohlcv
 from engines.patterns import detect_patterns
@@ -147,6 +148,8 @@ def render_strategy_playbook() -> None:
         symbol = st.text_input("Symbol", value="NQH26")
         selected_date = st.date_input("Analysis date", value=today)
         whipsaw_threshold = st.slider("Whipsaw Risk Ratio", min_value=1.5, max_value=6.0, value=3.0, step=0.5)
+        auto_refresh = st.checkbox("Auto-refresh", value=True)
+        refresh_seconds = st.selectbox("Refresh every (sec)", options=[30, 60], index=1, disabled=not auto_refresh)
 
     res_today = fetch_intraday_ohlcv(symbol, selected_date)
     if isinstance(res_today, tuple):
@@ -343,3 +346,19 @@ def render_strategy_playbook() -> None:
     st.write(summary_paragraph)
     for line in summary_bullets:
         st.write(f"- {line}")
+
+    should_refresh = bool(auto_refresh) and selected_date == today
+    if should_refresh:
+        refresh_ms = int(refresh_seconds) * 1000
+        st.caption(f"Auto-refresh is on ({int(refresh_seconds)}s cadence for today).")
+        components.html(
+            f"""
+            <script>
+                setTimeout(function() {{
+                    window.parent.location.reload();
+                }}, {refresh_ms});
+            </script>
+            """,
+            height=0,
+            width=0,
+        )
