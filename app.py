@@ -5,6 +5,7 @@ from ui.history import render_history
 from ui.compare import render_compare
 from ui.settings import render_settings
 from ui.definitions_explanations import render_definitions_explanations
+from ui.strategy_playbook import render_strategy_playbook
 
 
 APP_TITLE = "NQ Quant Terminal"
@@ -21,7 +22,14 @@ def main():
         st.header("Navigation")
         page = st.selectbox(
             "Page",
-            ["Live Analysis", "History", "Compare Days", "Definitions/Explanatinos", "Settings"],
+            [
+                "Live Analysis",
+                "Strategy Playbook",
+                "History",
+                "Compare Days",
+                "Definitions/Explanatinos",
+                "Settings",
+            ],
         )
 
         st.markdown("---")
@@ -32,6 +40,8 @@ def main():
 
     if page == "Live Analysis":
         render_live_analysis()
+    elif page == "Strategy Playbook":
+        render_strategy_playbook()
     elif page == "History":
         render_history()
     elif page == "Compare Days":
