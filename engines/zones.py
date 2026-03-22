@@ -481,7 +481,7 @@ def summarize_zone_outlook(
         reverse=True,
     )
     rejecting = [d for d in details if d["touched"] and d["rejection_hits"] > 0 and not d["failed"]]
-    failed = [d for d in details if d["failed"]]
+    failed_zones = [d for d in details if d["failed"]]
     liquidity_sorted = sorted(details, key=lambda d: d["liquidity_score"], reverse=True)
 
     lines = []
@@ -491,11 +491,11 @@ def summarize_zone_outlook(
             zone = item["zone"]
             label = _format_zone_label(zone)
             touched = item["touched"]
-            failed = item["failed"]
+            is_failed = item["failed"]
             rejection_hits = item["rejection_hits"]
             aligns_with_trend = trend_bias == "Bullish" if zone.side == "bullish" else trend_bias == "Bearish"
 
-            if failed:
+            if is_failed:
                 outcome = "Likely push through -> fail"
             elif rejection_hits > 0 and aligns_with_trend:
                 outcome = "Likely reject -> continuation"
@@ -527,9 +527,9 @@ def summarize_zone_outlook(
         lines.append(f"- Rejecting zones ({len(rejecting)}):")
         for item in rejecting[:max_items]:
             lines.append(f"  - {_format_zone_label(item['zone'])}")
-    if failed:
-        lines.append(f"- Failed zones ({len(failed)}):")
-        for item in failed[:max_items]:
+    if failed_zones:
+        lines.append(f"- Failed zones ({len(failed_zones)}):")
+        for item in failed_zones[:max_items]:
             lines.append(f"  - {_format_zone_label(item['zone'])}")
 
     if not lines:
