@@ -226,6 +226,33 @@ def render_definitions_explanations() -> None:
         "- Whipsaw: London and US sessions move in opposite directions."
     )
 
+    st.markdown("### US Open Reclaim Pattern (Watch Setup)")
+    st.markdown(
+        "This is a **heads-up pattern** for the US open that aims to catch the real move early. "
+        "It is treated as a secondary setup and does not replace the core playbook decision."
+    )
+    st.markdown(
+        "- Core structure: the 09:30 candle shows two-sided rejection (long upper and lower wick), "
+        "and the 09:31 candle closes green."
+    )
+    st.markdown(
+        "- Confirmation: price then reclaims Daily VWAP (close back above VWAP) before 10:30 ET."
+    )
+    st.markdown(
+        "- Anticipation mode (before 09:30 ET): the app scores pre-open structure, sweep behavior, "
+        "VWAP posture, and nearby liquidity confluences to issue a watch alert with provisional entry/stop/target rules."
+    )
+    st.markdown(
+        "- Why it matters: this can signal a failed early sell impulse and rotation back toward upside liquidity."
+    )
+    st.markdown(
+        "- Typical plan after confirmation: entry on reclaim close, stop at setup low, "
+        "targets at pre-open high and extension levels."
+    )
+    st.markdown(
+        "- Invalidation: no VWAP reclaim by 10:30 ET, or post-trigger failure below setup low."
+    )
+
     st.markdown("## How Data Determines Price Action")
     st.markdown(
         "- VWAP posture guides mean-reversion vs continuation around fair value."

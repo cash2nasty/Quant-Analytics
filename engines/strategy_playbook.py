@@ -17,6 +17,10 @@ from engines.zones import (
 from indicators.moving_averages import compute_anchored_vwap, compute_daily_vwap, compute_weekly_vwap
 
 
+OPEN_PATTERN_CANDLE3_STRICTNESS = "balanced"
+OPEN_PATTERN_RECLAIM_SPEED_WINDOW_MINUTES = 30.0
+
+
 def _fmt_ts(value: Optional[pd.Timestamp]) -> Optional[str]:
     if value is None:
         return None
@@ -163,6 +167,541 @@ def _detect_vwap_trigger(df: pd.DataFrame) -> Optional[Dict[str, object]]:
                 }
 
     return None
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _infer_bar_minutes(df: pd.DataFrame, default_minutes: int = 5) -> int:
+    if df is None or df.empty or "timestamp" not in df.columns or len(df) < 3:
+        return default_minutes
+    ts = pd.to_datetime(df["timestamp"]).sort_values()
+    deltas = ts.diff().dropna().dt.total_seconds() / 60.0
+    deltas = deltas[(deltas >= 1) & (deltas <= 60)]
+    if deltas.empty:
+        return default_minutes
+    mode = deltas.mode()
+    minutes = int(round(float(mode.iloc[0]))) if not mode.empty else default_minutes
+    return max(1, minutes)
+
+
+def _us_open_reclaim_watch(
+    df: pd.DataFrame,
+    trade_date: dt.date,
+    now: dt.datetime,
+    confluences: Optional[List[Dict[str, object]]] = None,
+) -> Dict[str, object]:
+    start_0930 = pd.Timestamp.combine(trade_date, dt.time(9, 30))
+    end_1030 = pd.Timestamp.combine(trade_date, dt.time(10, 30))
+    confluences = confluences or []
+
+    base = {
+        "name": "US Open Reclaim Pattern",
+        "status": "Not Active",
+        "direction": "Bullish",
+        "confidence": 0.0,
+        "reason": "Waiting for US open structure.",
+        "checklist": [
+            "9:30 candle shows two-sided rejection (long upper and lower wick).",
+            "9:31 candle closes green.",
+            "Price reclaims daily VWAP by 10:30 ET.",
+        ],
+        "entry": None,
+        "stop": None,
+        "targets": [],
+        "invalidation": "No VWAP reclaim by 10:30 ET or a break below setup low after trigger.",
+        "anticipation_factors": [],
+        "provisional_plan": {
+            "entry_rule": "After 9:31, first close back above Daily VWAP.",
+            "stop_rule": "Lowest low from 9:30 through trigger candle.",
+            "target_rule": "Target 1 = pre-open high (09:00-09:29), Target 2 = 2R extension.",
+        },
+        "score_breakdown": [],
+        "penalty_points": 0.0,
+        "model_settings": {
+            "candle3_strictness": OPEN_PATTERN_CANDLE3_STRICTNESS,
+            "reclaim_speed_window_minutes": OPEN_PATTERN_RECLAIM_SPEED_WINDOW_MINUTES,
+        },
+    }
+
+    if df is None or df.empty:
+        base["reason"] = "No intraday bars available."
+        return base
+
+    work = df.copy().sort_values("timestamp").reset_index(drop=True)
+    work["timestamp"] = pd.to_datetime(work["timestamp"])
+    bar_minutes = _infer_bar_minutes(work, default_minutes=5)
+
+    second_candle_ts = start_0930 + pd.Timedelta(minutes=bar_minutes)
+    third_candle_ts = second_candle_ts + pd.Timedelta(minutes=bar_minutes)
+    if bar_minutes <= 1:
+        base["checklist"] = [
+            "9:30 candle shows two-sided rejection (long upper and lower wick).",
+            "9:31 candle closes green.",
+            "Price reclaims daily VWAP by 10:30 ET.",
+        ]
+    else:
+        base["checklist"] = [
+            "9:30 candle shows sweep/rejection behavior.",
+            "Next 5m candle is bullish or followed by a strong candle-3 close above candle-2 body/high.",
+            "Price reclaims/accepts above daily VWAP during the open window.",
+        ]
+
+    pre_open_window = work[
+        (work["timestamp"] >= pd.Timestamp.combine(trade_date, dt.time(8, 0)))
+        & (work["timestamp"] < start_0930)
+    ]
+
+    vwap = compute_daily_vwap(work)
+    if not vwap.empty:
+        work["daily_vwap"] = vwap.values
+    else:
+        work["daily_vwap"] = pd.NA
+
+    component_max = {
+        "Sweep Quality": 20.0,
+        "VWAP Reclaim Quality": 20.0,
+        "Confirmation Candle": 15.0,
+        "Retest Behavior": 15.0,
+        "Structure Alignment": 15.0,
+        "Liquidity Path Clarity": 10.0,
+    }
+
+    def _build_score(components: Dict[str, float], notes: Dict[str, str], penalty_points: float) -> Tuple[float, List[Dict[str, object]]]:
+        rows: List[Dict[str, object]] = []
+        total = 0.0
+        for name, max_score in component_max.items():
+            val = max(0.0, min(float(components.get(name, 0.0)), max_score))
+            total += val
+            rows.append(
+                {
+                    "component": name,
+                    "score": round(val, 1),
+                    "max": max_score,
+                    "note": notes.get(name, ""),
+                }
+            )
+        total -= max(0.0, min(float(penalty_points), 15.0))
+        return max(0.0, min(total, 100.0)), rows
+
+    if now < start_0930:
+        factors: List[str] = []
+        notes: Dict[str, str] = {}
+        comp = {name: 0.0 for name in component_max.keys()}
+        penalty_points = 0.0
+
+        if not pre_open_window.empty:
+            pre_high = _safe_float(pre_open_window["high"].max())
+            pre_low = _safe_float(pre_open_window["low"].min())
+            pre_range = max(pre_high - pre_low, 1e-6)
+            last_close = _safe_float(pre_open_window["close"].iloc[-1])
+            last_open = _safe_float(pre_open_window["open"].iloc[-1])
+
+            early = pre_open_window[pre_open_window["timestamp"] < pd.Timestamp.combine(trade_date, dt.time(9, 0))]
+            late = pre_open_window[pre_open_window["timestamp"] >= pd.Timestamp.combine(trade_date, dt.time(9, 0))]
+
+            if not early.empty and not late.empty:
+                early_low = _safe_float(early["low"].min())
+                late_low = _safe_float(late["low"].min())
+                recovery_ratio = (last_close - late_low) / pre_range
+                if late_low < early_low:
+                    comp["Sweep Quality"] = min(12.0 + max(recovery_ratio, 0.0) * 16.0, 20.0)
+                    notes["Sweep Quality"] = "Pre-open low sweep and recovery detected."
+                    factors.append("Pre-open swept earlier lows and recovered (bullish sweep behavior).")
+                else:
+                    comp["Sweep Quality"] = 6.0
+                    notes["Sweep Quality"] = "No clear pre-open sweep; partial credit only."
+            else:
+                comp["Sweep Quality"] = 5.0
+                notes["Sweep Quality"] = "Limited early/late pre-open segmentation available."
+
+            if pd.notna(work["daily_vwap"].iloc[-1]):
+                vwap_last = _safe_float(work["daily_vwap"].iloc[-1])
+                dist = abs(last_close - vwap_last)
+                if last_close <= vwap_last:
+                    comp["VWAP Reclaim Quality"] = min(16.0 + max(0.0, 1.0 - dist / max(pre_range, 1e-6)) * 4.0, 20.0)
+                    notes["VWAP Reclaim Quality"] = "Below/near VWAP pre-open with reclaim potential."
+                    factors.append("Price is at/below Daily VWAP pre-open (reclaim potential).")
+                else:
+                    comp["VWAP Reclaim Quality"] = max(6.0, 12.0 - min(dist / max(pre_range, 1e-6), 1.0) * 6.0)
+                    notes["VWAP Reclaim Quality"] = "Already above VWAP; less reclaim edge but still actionable."
+                    factors.append("Price already above Daily VWAP pre-open (less reclaim distance).")
+            else:
+                comp["VWAP Reclaim Quality"] = 8.0
+                notes["VWAP Reclaim Quality"] = "VWAP unavailable; using reduced default score."
+
+            body_ratio = abs(last_close - last_open) / pre_range
+            if body_ratio > 0.18:
+                comp["Confirmation Candle"] = min(4.0 + body_ratio * 30.0, 9.0)
+                notes["Confirmation Candle"] = "Premarket impulse candle present; open confirmation pending."
+            else:
+                comp["Confirmation Candle"] = 3.0
+                notes["Confirmation Candle"] = "No strong pre-open impulse candle yet."
+
+            late_window = pre_open_window[pre_open_window["timestamp"] >= pd.Timestamp.combine(trade_date, dt.time(9, 15))]
+            if not late_window.empty:
+                lows = late_window["low"].astype(float).values
+                higher_low = lows[-1] >= min(lows)
+                comp["Retest Behavior"] = 8.0 if higher_low else 4.0
+                notes["Retest Behavior"] = "Pre-open pullbacks are stabilizing." if higher_low else "Pre-open retests still unstable."
+            else:
+                comp["Retest Behavior"] = 4.0
+                notes["Retest Behavior"] = "Insufficient late pre-open bars for retest assessment."
+
+            if not pre_open_window.empty and len(pre_open_window) >= 8:
+                recent = pre_open_window.tail(8)
+                first_mid = (_safe_float(recent.iloc[0]["open"]) + _safe_float(recent.iloc[0]["close"])) / 2.0
+                last_mid = (_safe_float(recent.iloc[-1]["open"]) + _safe_float(recent.iloc[-1]["close"])) / 2.0
+                slope_up = last_mid > first_mid
+                comp["Structure Alignment"] = 10.0 if slope_up else 5.0
+                notes["Structure Alignment"] = "Short-term pre-open slope is rising." if slope_up else "Pre-open slope not yet aligned bullish."
+            else:
+                comp["Structure Alignment"] = 5.0
+                notes["Structure Alignment"] = "Not enough bars for structure slope estimate."
+
+            bullish_confluences = [
+                c
+                for c in confluences
+                if str(c.get("Status", "")).lower() != "invalidated" and str(c.get("Side", "")).lower() == "bullish"
+            ]
+            near = False
+            if bullish_confluences:
+                for c in bullish_confluences[:7]:
+                    low_px = _safe_float(c.get("Price Low"))
+                    high_px = _safe_float(c.get("Price High"))
+                    if low_px - 10.0 <= last_close <= high_px + 10.0:
+                        near = True
+                        break
+            if near:
+                comp["Liquidity Path Clarity"] = 8.0
+                notes["Liquidity Path Clarity"] = "Price is near bullish confluence with upside path to pre-open high."
+                factors.append("Nearby bullish liquidity confluence detected.")
+            else:
+                comp["Liquidity Path Clarity"] = 4.0
+                notes["Liquidity Path Clarity"] = "Liquidity path less clear pre-open."
+
+            if abs(last_close - (pre_low + pre_range * 0.5)) < pre_range * 0.10:
+                penalty_points += 4.0
+                factors.append("Penalty: pre-open close near range midpoint (less directional edge).")
+
+            if pd.notna(work["daily_vwap"].iloc[-1]) and len(pre_open_window) >= 20:
+                recent = pre_open_window.tail(20).copy()
+                rv = work[(work["timestamp"].isin(recent["timestamp"]))].copy()
+                if not rv.empty and "daily_vwap" in rv.columns:
+                    side = (rv["close"].astype(float) > rv["daily_vwap"].astype(float)).astype(int)
+                    flips = int((side.diff().abs().fillna(0) > 0).sum())
+                    if flips >= 6:
+                        penalty_points += 5.0
+                        factors.append("Penalty: frequent VWAP side flips pre-open (chop risk).")
+
+            base["provisional_plan"] = {
+                "entry_rule": "If 9:30/9:31 structure confirms, enter on first close above Daily VWAP.",
+                "stop_rule": f"Use setup low; pre-open reference low is {pre_low:.2f}.",
+                "target_rule": f"Target 1 near pre-open high {pre_high:.2f}; Target 2 at 2R extension.",
+            }
+        else:
+            factors.append("Limited pre-open bars; use reduced confidence.")
+            comp["Sweep Quality"] = 4.0
+            comp["VWAP Reclaim Quality"] = 6.0
+            comp["Confirmation Candle"] = 2.0
+            comp["Retest Behavior"] = 2.0
+            comp["Structure Alignment"] = 3.0
+            comp["Liquidity Path Clarity"] = 2.0
+            notes["Sweep Quality"] = "No pre-open structure data."
+            notes["VWAP Reclaim Quality"] = "No pre-open structure data."
+            notes["Confirmation Candle"] = "No pre-open structure data."
+            notes["Retest Behavior"] = "No pre-open structure data."
+            notes["Structure Alignment"] = "No pre-open structure data."
+            notes["Liquidity Path Clarity"] = "No pre-open structure data."
+
+        total_score, breakdown = _build_score(comp, notes, penalty_points)
+
+        base["status"] = "Watch"
+        base["confidence"] = round(min(total_score, 70.0), 1)
+        base["reason"] = "Pre-open anticipation mode: monitor open for sweep/reclaim confirmation."
+        base["anticipation_factors"] = factors
+        base["score_breakdown"] = breakdown
+        base["penalty_points"] = round(min(max(penalty_points, 0.0), 15.0), 1)
+        return base
+
+    c1_df = work[work["timestamp"] == start_0930]
+    c2_df = work[work["timestamp"] == second_candle_ts]
+    c3_df = work[work["timestamp"] == third_candle_ts]
+
+    if c1_df.empty:
+        base["status"] = "Invalidated"
+        base["reason"] = "Missing 9:30 candle data for this date."
+        return base
+
+    c1 = c1_df.iloc[0]
+    c1_high = _safe_float(c1["high"])
+    c1_low = _safe_float(c1["low"])
+    c1_open = _safe_float(c1["open"])
+    c1_close = _safe_float(c1["close"])
+    c1_range = max(c1_high - c1_low, 1e-6)
+    c1_upper = c1_high - max(c1_open, c1_close)
+    c1_lower = min(c1_open, c1_close) - c1_low
+    c1_body = abs(c1_close - c1_open)
+    wick_ok = c1_upper >= 0.20 * c1_range and c1_lower >= 0.20 * c1_range and c1_body <= 0.60 * c1_range
+
+    notes: Dict[str, str] = {}
+    comp = {name: 0.0 for name in component_max.keys()}
+    penalty_points = 0.0
+
+    pre_open_low = _safe_float(pre_open_window["low"].min()) if not pre_open_window.empty else c1_low
+    pre_open_high = _safe_float(pre_open_window["high"].max()) if not pre_open_window.empty else c1_high
+
+    lower_ratio = c1_lower / c1_range
+    upper_ratio = c1_upper / c1_range
+    sweep_bonus = 5.0 if c1_low < pre_open_low else 0.0
+    comp["Sweep Quality"] = min(max(lower_ratio * 10.0 + upper_ratio * 5.0 + sweep_bonus, 0.0), 20.0)
+    notes["Sweep Quality"] = "9:30 two-sided rejection quality plus low sweep context."
+
+    if c2_df.empty:
+        base["status"] = "Watch"
+        comp["Confirmation Candle"] = 4.0 if wick_ok else 1.5
+        notes["Confirmation Candle"] = "Waiting for second open-window candle confirmation."
+        comp["Retest Behavior"] = 3.0
+        notes["Retest Behavior"] = "Retest sequence not formed yet."
+        comp["Structure Alignment"] = 6.0 if wick_ok else 3.0
+        notes["Structure Alignment"] = "Provisional structure read after 9:30 only."
+        comp["Liquidity Path Clarity"] = 5.0 if pre_open_high > c1_close else 3.0
+        notes["Liquidity Path Clarity"] = "Path estimated from pre-open highs."
+        comp["VWAP Reclaim Quality"] = 5.0
+        notes["VWAP Reclaim Quality"] = "VWAP reclaim not evaluated yet."
+        total_score, breakdown = _build_score(comp, notes, penalty_points)
+        base["confidence"] = round(min(total_score, 74.0), 1)
+        base["reason"] = "Open candle printed; waiting for second-candle confirmation."
+        base["score_breakdown"] = breakdown
+        base["penalty_points"] = 0.0
+        return base
+
+    c2 = c2_df.iloc[0]
+    c2_open = _safe_float(c2["open"])
+    c2_close = _safe_float(c2["close"])
+    c2_high = _safe_float(c2["high"])
+    c2_green = c2_close > c2_open
+
+    c3_close = _safe_float(c3_df.iloc[0]["close"]) if not c3_df.empty else c2_close
+    c2_body_top = max(c2_open, c2_close)
+    c2_body_mid = (c2_open + c2_close) / 2.0
+    c3_break_mid = c3_close > c2_body_mid
+    c3_break_body = c3_close > c2_body_top
+    c3_break_high = c3_close > c2_high
+
+    strictness = str(OPEN_PATTERN_CANDLE3_STRICTNESS).strip().lower()
+    if strictness not in {"conservative", "balanced", "aggressive"}:
+        strictness = "balanced"
+
+    if strictness == "conservative":
+        c3_confirm = c3_break_high
+    elif strictness == "aggressive":
+        c3_confirm = c3_break_mid
+    else:
+        c3_confirm = c3_break_body
+
+    if bar_minutes <= 1:
+        setup_confirmed = c2_green
+    else:
+        setup_confirmed = c2_green or c3_confirm
+
+    if not wick_ok or not setup_confirmed:
+        base["status"] = "Invalidated"
+        why = []
+        if not wick_ok:
+            why.append("9:30 candle did not meet two-sided wick quality")
+        if not setup_confirmed:
+            if bar_minutes <= 1:
+                why.append("9:31 did not close green")
+            else:
+                why.append("second/third open candles did not confirm bullish continuation")
+        base["reason"] = "; ".join(why) + "."
+        base["confidence"] = 15.0
+        comp["Confirmation Candle"] = 0.0
+        notes["Confirmation Candle"] = "Open-window candle confirmation failed."
+        comp["VWAP Reclaim Quality"] = 2.0
+        notes["VWAP Reclaim Quality"] = "Setup invalid before reclaim."
+        comp["Retest Behavior"] = 2.0
+        notes["Retest Behavior"] = "No valid continuation retest sequence."
+        comp["Structure Alignment"] = 2.0
+        notes["Structure Alignment"] = "Structure did not confirm."
+        comp["Liquidity Path Clarity"] = 2.0
+        notes["Liquidity Path Clarity"] = "Path is unclear after invalidation."
+        _, breakdown = _build_score(comp, notes, 8.0)
+        base["score_breakdown"] = breakdown
+        base["penalty_points"] = 8.0
+        return base
+
+    body_strength = (c2_close - c2_open) / c1_range
+    engulfing = c2_close >= c1_open
+    c3_bonus = 0.0
+    if bar_minutes > 1:
+        if c3_break_body:
+            c3_bonus += 2.0
+        if c3_break_high:
+            c3_bonus += 2.0
+    comp["Confirmation Candle"] = min(8.0 + max(body_strength, 0.0) * 10.0 + (4.0 if engulfing else 0.0) + c3_bonus, 15.0)
+    notes["Confirmation Candle"] = f"Open-window confirmation strength (candle-3 strictness: {strictness})."
+
+    vwap = compute_daily_vwap(work)
+    if vwap.empty:
+        base["status"] = "Armed"
+        comp["VWAP Reclaim Quality"] = 7.0
+        notes["VWAP Reclaim Quality"] = "VWAP unavailable; reduced confidence until reclaim proxy."
+        comp["Retest Behavior"] = 5.0
+        notes["Retest Behavior"] = "Retest pending."
+        comp["Structure Alignment"] = 8.0
+        notes["Structure Alignment"] = "Early structure favorable; needs reclaim confirmation."
+        comp["Liquidity Path Clarity"] = 6.0
+        notes["Liquidity Path Clarity"] = "Upside path based on pre-open high reference."
+        total_score, breakdown = _build_score(comp, notes, penalty_points)
+        base["confidence"] = round(min(total_score, 78.0), 1)
+        base["reason"] = "Setup formed; VWAP unavailable, waiting for reclaim confirmation."
+        base["score_breakdown"] = breakdown
+        base["penalty_points"] = round(penalty_points, 1)
+        return base
+
+    work["daily_vwap"] = vwap.values
+    reclaim_window = work[
+        (work["timestamp"] >= second_candle_ts)
+        & (work["timestamp"] <= end_1030)
+        & (work["close"] > work["daily_vwap"])
+    ]
+
+    if reclaim_window.empty:
+        latest_ts = pd.to_datetime(work["timestamp"].iloc[-1])
+        comp["VWAP Reclaim Quality"] = 6.0
+        notes["VWAP Reclaim Quality"] = "Reclaim not printed yet; still waiting."
+        comp["Retest Behavior"] = 6.0
+        notes["Retest Behavior"] = "Post-open retest developing; no reclaim confirmation yet."
+        comp["Structure Alignment"] = 8.0
+        notes["Structure Alignment"] = "Structure favorable but unconfirmed by VWAP acceptance."
+        comp["Liquidity Path Clarity"] = 6.0
+        notes["Liquidity Path Clarity"] = "Path remains provisional until reclaim."
+        total_score, breakdown = _build_score(comp, notes, penalty_points)
+        if latest_ts <= end_1030:
+            base["status"] = "Armed"
+            base["confidence"] = round(min(total_score, 82.0), 1)
+            base["reason"] = "Setup confirmed; waiting for first close above VWAP."
+        else:
+            base["status"] = "Invalidated"
+            base["confidence"] = 22.0
+            base["reason"] = "No VWAP reclaim by 10:30 ET."
+            penalty_points += 9.0
+        base["score_breakdown"] = breakdown
+        base["penalty_points"] = round(min(max(penalty_points, 0.0), 15.0), 1)
+        return base
+
+    trigger = reclaim_window.iloc[0]
+    trigger_ts = pd.to_datetime(trigger["timestamp"])
+    entry = _safe_float(trigger["close"])
+
+    stop_window = work[(work["timestamp"] >= start_0930) & (work["timestamp"] <= trigger_ts)]
+    stop_price = _safe_float(stop_window["low"].min()) if not stop_window.empty else _safe_float(c1_low)
+    risk = max(entry - stop_price, 0.25)
+
+    pre_open_high = _safe_float(pre_open_window["high"].max()) if not pre_open_window.empty else entry + risk
+    if pre_open_high <= entry:
+        pre_open_high = entry + risk
+
+    target_1 = pre_open_high
+    target_2 = entry + 2.0 * risk
+    rr_1 = (target_1 - entry) / risk
+
+    reclaim_delay = max((trigger_ts - second_candle_ts).total_seconds() / 60.0, 0.0)
+    configured_speed = max(float(OPEN_PATTERN_RECLAIM_SPEED_WINDOW_MINUTES), 10.0)
+    speed_norm = max(12.0, configured_speed * 0.6) if bar_minutes <= 1 else configured_speed
+    reclaim_speed_score = max(0.0, 1.0 - min(reclaim_delay / speed_norm, 1.0))
+    reclaim_distance = max(entry - _safe_float(trigger["daily_vwap"]), 0.0)
+    comp["VWAP Reclaim Quality"] = min(10.0 + reclaim_speed_score * 6.0 + min(reclaim_distance / max(risk, 1e-6), 1.0) * 4.0, 20.0)
+    notes["VWAP Reclaim Quality"] = f"Scored from reclaim speed (window {speed_norm:.0f}m) and close strength above VWAP."
+
+    post_trigger_minutes = 8 if bar_minutes <= 1 else 20
+    post_trigger = work[(work["timestamp"] > trigger_ts) & (work["timestamp"] <= trigger_ts + pd.Timedelta(minutes=post_trigger_minutes))].copy()
+    retest_score = 6.0
+    if not post_trigger.empty:
+        touched_vwap = (post_trigger["low"] <= post_trigger["daily_vwap"]).any()
+        held_after_touch = False
+        if touched_vwap:
+            touch_idx = post_trigger[post_trigger["low"] <= post_trigger["daily_vwap"]].index[0]
+            after_touch = post_trigger.loc[touch_idx:]
+            held_after_touch = bool((after_touch["close"] >= after_touch["daily_vwap"]).all())
+        if touched_vwap and held_after_touch:
+            retest_score = 14.0
+        elif touched_vwap:
+            retest_score = 8.0
+            penalty_points += 3.0
+        else:
+            retest_score = 9.0
+    comp["Retest Behavior"] = min(retest_score, 15.0)
+    notes["Retest Behavior"] = "Scored from post-reclaim VWAP retest and hold behavior."
+
+    pre_trigger = work[(work["timestamp"] >= start_0930) & (work["timestamp"] <= trigger_ts)]
+    recent_high = _safe_float(pre_trigger["high"].tail(6).max()) if not pre_trigger.empty else entry
+    structure_break = entry >= recent_high
+    comp["Structure Alignment"] = 12.0 if structure_break else 8.0
+    notes["Structure Alignment"] = "Scored from local structure break strength into trigger."
+
+    bearish_blocks_between = 0
+    for c in confluences[:10]:
+        side = str(c.get("Side", "")).lower()
+        status = str(c.get("Status", "")).lower()
+        if side != "bearish" or status == "invalidated":
+            continue
+        low_px = _safe_float(c.get("Price Low"))
+        if entry < low_px < target_1:
+            bearish_blocks_between += 1
+    path_score = 10.0 - min(bearish_blocks_between * 2.5, 7.5)
+    path_score += min(max(rr_1 - 1.0, 0.0) * 1.5, 2.5)
+    comp["Liquidity Path Clarity"] = max(2.0, min(path_score, 10.0))
+    notes["Liquidity Path Clarity"] = "Scored by target path friction and R multiple quality."
+
+    if rr_1 < 1.0:
+        penalty_points += 5.0
+    if not post_trigger.empty:
+        adverse = float((entry - post_trigger["low"]).max()) if len(post_trigger) else 0.0
+        if adverse > 0.8 * risk:
+            penalty_points += 4.0
+
+    confidence, breakdown = _build_score(comp, notes, penalty_points)
+
+    base["status"] = "Triggered"
+    base["confidence"] = round(confidence, 1)
+    if bar_minutes <= 1:
+        base["reason"] = "9:30/9:31 setup formed and first close above daily VWAP confirmed the trigger."
+    else:
+        base["reason"] = "Open-window setup formed and first close above daily VWAP confirmed the trigger."
+    base["entry"] = {
+        "time": _fmt_ts(trigger_ts),
+        "price": round(entry, 2),
+    }
+    base["stop"] = {
+        "price": round(stop_price, 2),
+        "rule": "Lowest low from 9:30 through trigger candle.",
+    }
+    base["targets"] = [
+        {
+            "name": "Target 1 (Pre-open High)",
+            "price": round(target_1, 2),
+            "rr": round(rr_1, 2),
+        },
+        {
+            "name": "Target 2 (2R Extension)",
+            "price": round(target_2, 2),
+            "rr": 2.0,
+        },
+    ]
+    base["anticipation_factors"] = [
+        "Post-open confirmation complete: 9:30/9:31 structure + VWAP reclaim.",
+        f"Pre-open high reference used for Target 1 ({target_1:.2f}).",
+    ]
+    base["score_breakdown"] = breakdown
+    base["penalty_points"] = round(min(max(penalty_points, 0.0), 15.0), 1)
+    return base
 
 
 def _zone_touch_times(df: pd.DataFrame, zone: Zone) -> Tuple[Optional[str], Optional[str], int]:
@@ -446,6 +985,18 @@ def build_strategy_playbook(
             },
             "entry_blueprints": [],
             "timeframe_playbook": [],
+            "open_pattern_watch": {
+                "name": "US Open Reclaim Pattern",
+                "status": "Not Active",
+                "direction": "Bullish",
+                "confidence": 0.0,
+                "reason": "No intraday data available.",
+                "checklist": [],
+                "entry": None,
+                "stop": None,
+                "targets": [],
+                "invalidation": "n/a",
+            },
         }
 
     df = df_today.copy().sort_values("timestamp")
@@ -716,6 +1267,7 @@ def build_strategy_playbook(
         reference_confluences=reference_confluences,
         vwap_levels=vwap_levels,
     )
+    open_pattern_watch = _us_open_reclaim_watch(df=df, trade_date=trade_date, now=now, confluences=confluences)
 
     return {
         "decision": {
@@ -742,6 +1294,7 @@ def build_strategy_playbook(
         },
         "entry_blueprints": entry_blueprints,
         "timeframe_playbook": _timeframe_playbook(ny_mode),
+        "open_pattern_watch": open_pattern_watch,
         "market_snapshot": {
             "last_price": last_price,
             "day_high": day_high,

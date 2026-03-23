@@ -59,6 +59,7 @@ def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
     targets = playbook.get("targets", []) or []
     vwap_levels = playbook.get("vwap_levels", []) or []
     power_hour = playbook.get("power_hour", {}) or {}
+    open_watch = playbook.get("open_pattern_watch", {}) or {}
 
     trade_today = str(decision.get("trade_today", "Wait"))
     ny_mode = str(decision.get("ny_mode", "n/a"))
@@ -115,6 +116,11 @@ def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
     if power_hour:
         bullets.append(
             f"Power hour plan: focus {power_hour.get('focus', 'No')}, bias {power_hour.get('bias', 'Neutral')} — {power_hour.get('reason', 'n/a')}"
+        )
+
+    if open_watch:
+        bullets.append(
+            f"US Open Pattern Watch: {open_watch.get('status', 'Not Active')} ({float(open_watch.get('confidence', 0.0)):.0f}% confidence) — {open_watch.get('reason', 'n/a')}"
         )
 
     support = decision.get("supporting_factors", []) or []
@@ -251,6 +257,67 @@ def render_strategy_playbook() -> None:
     triggers = playbook.get("triggers", [])
     if triggers:
         st.dataframe(pd.DataFrame(triggers), use_container_width=True)
+
+    st.markdown("### US Open Pattern Watch")
+    open_watch = playbook.get("open_pattern_watch", {}) or {}
+    status = str(open_watch.get("status", "Not Active"))
+    confidence = float(open_watch.get("confidence", 0.0))
+    st.write(f"- Status: {_status_color(status)} {status}")
+    st.write(f"- Confidence: {confidence:.0f}%")
+    st.write(f"- Reason: {open_watch.get('reason', 'n/a')}")
+
+    checklist = open_watch.get("checklist", []) or []
+    if checklist:
+        st.markdown("**Checklist**")
+        for item in checklist:
+            st.write(f"- {item}")
+
+    anticipation = open_watch.get("anticipation_factors", []) or []
+    if anticipation:
+        st.markdown("**Anticipation factors**")
+        for item in anticipation:
+            st.write(f"- {item}")
+
+    provisional_plan = open_watch.get("provisional_plan", {}) or {}
+    if provisional_plan:
+        st.markdown("**Provisional plan**")
+        st.write(f"- Entry rule: {provisional_plan.get('entry_rule', 'n/a')}")
+        st.write(f"- Stop rule: {provisional_plan.get('stop_rule', 'n/a')}")
+        st.write(f"- Target rule: {provisional_plan.get('target_rule', 'n/a')}")
+
+    score_breakdown = open_watch.get("score_breakdown", []) or []
+    if score_breakdown:
+        st.markdown("**Confidence model**")
+        settings = open_watch.get("model_settings", {}) or {}
+        if settings:
+            st.caption(
+                f"Settings: strictness={settings.get('candle3_strictness', 'balanced')} | "
+                f"reclaim_window={float(settings.get('reclaim_speed_window_minutes', 30.0)):.0f}m"
+            )
+        score_df = pd.DataFrame(score_breakdown)
+        preferred = ["component", "score", "max", "note"]
+        cols = [c for c in preferred if c in score_df.columns] + [c for c in score_df.columns if c not in preferred]
+        st.dataframe(score_df[cols], use_container_width=True)
+        penalty = float(open_watch.get("penalty_points", 0.0))
+        if penalty > 0:
+            st.caption(f"Penalty applied: -{penalty:.1f} points")
+
+    if status in {"Armed", "Triggered"}:
+        entry = open_watch.get("entry")
+        stop = open_watch.get("stop")
+        targets = open_watch.get("targets", []) or []
+        if entry:
+            st.write(f"- Entry: {entry.get('time', 'n/a')} @ {_fmt_price(entry.get('price'))}")
+        if stop:
+            st.write(f"- Stop: {_fmt_price(stop.get('price'))} ({stop.get('rule', 'n/a')})")
+        if targets:
+            st.markdown("**Targets**")
+            for t in targets[:2]:
+                st.write(
+                    f"- {t.get('name', 'Target')}: {_fmt_price(t.get('price'))} "
+                    f"(R:R {float(t.get('rr', 0.0)):.2f})"
+                )
+        st.caption(f"Invalidation: {open_watch.get('invalidation', 'n/a')}")
 
     st.markdown("### Entry Playbooks (If/Then)")
     blueprints = playbook.get("entry_blueprints", [])
