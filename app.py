@@ -9,6 +9,42 @@ from ui.strategy_playbook import render_strategy_playbook
 
 
 APP_TITLE = "NQ Quant Terminal"
+PAGES = [
+    "Live Analysis",
+    "Strategy Playbook",
+    "History",
+    "Compare Days",
+    "Definitions/Explanatinos",
+    "Settings",
+]
+
+
+def _get_query_page() -> str:
+    try:
+        qp = st.query_params
+        page = qp.get("page", "")
+        if isinstance(page, list):
+            page = page[0] if page else ""
+        return str(page)
+    except Exception:
+        try:
+            qp = st.experimental_get_query_params()
+            vals = qp.get("page", [""])
+            return str(vals[0]) if vals else ""
+        except Exception:
+            return ""
+
+
+def _set_query_page(page: str) -> None:
+    try:
+        st.query_params["page"] = page
+        return
+    except Exception:
+        pass
+    try:
+        st.experimental_set_query_params(page=page)
+    except Exception:
+        pass
 
 
 def main():
@@ -20,17 +56,15 @@ def main():
 
     with st.sidebar:
         st.header("Navigation")
+        query_page = _get_query_page()
+        default_index = PAGES.index(query_page) if query_page in PAGES else 0
         page = st.selectbox(
             "Page",
-            [
-                "Live Analysis",
-                "Strategy Playbook",
-                "History",
-                "Compare Days",
-                "Definitions/Explanatinos",
-                "Settings",
-            ],
+            PAGES,
+            index=default_index,
         )
+        if query_page != page:
+            _set_query_page(page)
 
         st.markdown("---")
         st.subheader("External")
