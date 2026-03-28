@@ -58,6 +58,8 @@ def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
     decision = playbook.get("decision", {})
     primary_trigger = playbook.get("primary_trigger") or {}
     entry_blueprints = playbook.get("entry_blueprints", []) or []
+    confluence_entry_styles = playbook.get("confluence_entry_styles", []) or []
+    daily_entry_capacity = playbook.get("daily_entry_capacity", {}) or {}
     confluences = playbook.get("confluences", []) or []
     targets = playbook.get("targets", []) or []
     vwap_levels = playbook.get("vwap_levels", []) or []
@@ -95,6 +97,30 @@ def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
         )
         bullets.append(
             f"Execution trigger: {top_setup.get('Trigger', 'n/a')} | TF: {top_setup.get('Execution TF', 'n/a')} | Session: {top_setup.get('Session', 'n/a')}"
+        )
+        if top_setup.get("Confluence Entry"):
+            bullets.append(
+                f"Confluence execution: {top_setup.get('Confluence Entry')} ({top_setup.get('Entry Reason', 'n/a')})"
+            )
+
+    if confluence_entry_styles:
+        top_style = confluence_entry_styles[0]
+        bullets.append(
+            f"Top zone style: {top_style.get('Confluence', 'n/a')} -> {top_style.get('Suggested Entry', 'n/a')} "
+            f"(tap {top_style.get('First Tap Price', 'n/a')} | midline {top_style.get('Midline Price', 'n/a')})"
+        )
+        bullets.append(
+            f"Entry style timing/exit: formed {top_style.get('Formed Time', 'n/a')} | exit {top_style.get('Exit', 'n/a')}"
+        )
+
+    if daily_entry_capacity:
+        bullets.append(
+            "Daily entry estimate: "
+            f"{daily_entry_capacity.get('expected_min', 0)}-{daily_entry_capacity.get('expected_max', 0)} "
+            f"(likely {daily_entry_capacity.get('likely', 0)})."
+        )
+        bullets.append(
+            f"End-of-day execution status: {daily_entry_capacity.get('eod_execution_status', 'Pending')}"
         )
 
     if daily_vwap:
@@ -171,6 +197,7 @@ def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
     decision = playbook.get("decision", {}) or {}
     trigger = playbook.get("primary_trigger") or {}
     entry_rows = playbook.get("entry_blueprints", []) or []
+    entry_style_rows = playbook.get("confluence_entry_styles", []) or []
     power_hour = playbook.get("power_hour", {}) or {}
     confluence_rows = playbook.get("confluences", []) or []
 
@@ -195,11 +222,44 @@ def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
             "Setup": str(r.get("Setup", "n/a")),
             "IfThen": str(r.get("IfThen", "n/a")),
             "Trigger": str(r.get("Trigger", "n/a")),
+            "Confluence Entry": str(r.get("Confluence Entry", "n/a")),
+            "Entry Reason": str(r.get("Entry Reason", "n/a")),
             "Execution TF": str(r.get("Execution TF", "n/a")),
             "Session": str(r.get("Session", "n/a")),
         }
         for r in entry_rows
     ]
+
+    entry_style_map: Dict[str, Dict[str, Any]] = {}
+    for row in entry_style_rows:
+        sid = _confluence_id(
+            {
+                "Confluence": row.get("Confluence", "n/a"),
+                "Price Low": row.get("First Tap Price", "n/a"),
+                "Price High": row.get("Midline Price", "n/a"),
+                "Formed Time": row.get("Formed Time", "n/a"),
+            }
+        )
+        entry_style_map[sid] = {
+            "id": sid,
+            "confluence": str(row.get("Confluence", "n/a")),
+            "formed_time": str(row.get("Formed Time", "n/a")),
+            "suggested_entry": str(row.get("Suggested Entry", "n/a")),
+            "exit": str(row.get("Exit", "n/a")),
+            "tap_hit": str(row.get("Tap Hit", "No")),
+            "tap_time": str(row.get("Tap Time", "n/a")),
+            "midline_hit": str(row.get("Midline Hit", "No")),
+            "midline_time": str(row.get("Midline Time", "n/a")),
+            "zone_invalidated": str(row.get("Zone Invalidated", "No")),
+            "preferred_target": row.get("Preferred Target Price"),
+            "min_target": row.get("Minimum Target Price"),
+            "max_target": row.get("Maximum Target Price"),
+            "reaction_signal": str(row.get("Reaction Signal", "None")),
+            "reaction_score": row.get("Reaction Score"),
+            "reaction_time": str(row.get("Reaction Time", "n/a")),
+            "reaction_why": str(row.get("Reaction Why", "n/a")),
+            "reason": str(row.get("Reason", "n/a")),
+        }
 
     return {
         "decision": {
@@ -218,6 +278,7 @@ def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
             "must_happen": str(trigger.get("must_happen", "")),
         },
         "entry": entry_signature,
+        "entry_styles": entry_style_map,
         "power_hour": {
             "focus": str(power_hour.get("focus", "No")),
             "bias": str(power_hour.get("bias", "Neutral")),
@@ -337,6 +398,123 @@ def _build_update_events(prev_snapshot: Dict[str, Any], curr_snapshot: Dict[str,
         event["why"] = "Playbook alignment changed based on current trigger, mode, and confluence state."
         event["expect"] = "Use updated if/then conditions for next executable setup."
         events.append(event)
+
+    prev_entry_styles = prev_snapshot.get("entry_styles", {})
+    curr_entry_styles = curr_snapshot.get("entry_styles", {})
+    for sid, curr_style in curr_entry_styles.items():
+        prev_style = prev_entry_styles.get(sid, {})
+
+        if not prev_style:
+            event = _event_base(
+                reported_at,
+                "entry_style_baseline",
+                ["Entry Playbook Updates", "Important Updates"],
+                "Entry Playbook",
+                f"Confirmed entry style loaded for {curr_style.get('confluence', 'n/a')}: {curr_style.get('suggested_entry', 'n/a')}",
+            )
+            event["before"] = "No prior confirmed style"
+            event["after"] = (
+                f"Entry: {curr_style.get('suggested_entry', 'n/a')} | Exit: {curr_style.get('exit', 'n/a')}"
+            )
+            event["why"] = curr_style.get("reason", "n/a")
+            event["expect"] = (
+                "Preferred target: "
+                f"{curr_style.get('preferred_target', 'n/a')} | "
+                f"Min target: {curr_style.get('min_target', 'n/a')} | "
+                f"Max target: {curr_style.get('max_target', 'n/a')}"
+            )
+            events.append(event)
+
+        if prev_style.get("tap_hit", "No") != "Yes" and curr_style.get("tap_hit", "No") == "Yes":
+            event = _event_base(
+                reported_at,
+                "entry_style_tap_hit",
+                ["Entry Playbook Updates", "Important Updates"],
+                "Entry Playbook",
+                f"Price tapped confluence for {curr_style.get('confluence', 'n/a')}.",
+            )
+            event["event_time"] = curr_style.get("tap_time", reported_at)
+            event["before"] = "Tap status: No"
+            event["after"] = f"Tap status: Yes @ {curr_style.get('tap_time', 'n/a')}"
+            event["why"] = "Price entered the confluence boundaries and activated touch condition."
+            event["expect"] = (
+                "Watch follow-through toward targets. "
+                f"Preferred target: {curr_style.get('preferred_target', 'n/a')} | "
+                f"Min: {curr_style.get('min_target', 'n/a')} | "
+                f"Max: {curr_style.get('max_target', 'n/a')}"
+            )
+            events.append(event)
+
+        if prev_style.get("midline_hit", "No") != "Yes" and curr_style.get("midline_hit", "No") == "Yes":
+            event = _event_base(
+                reported_at,
+                "entry_style_midline_hit",
+                ["Entry Playbook Updates", "Important Updates"],
+                "Entry Playbook",
+                f"Price reached confluence midline for {curr_style.get('confluence', 'n/a')}.",
+            )
+            event["event_time"] = curr_style.get("midline_time", reported_at)
+            event["before"] = "Midline status: No"
+            event["after"] = f"Midline status: Yes @ {curr_style.get('midline_time', 'n/a')}"
+            event["why"] = "Midline threshold was touched inside the active confluence zone."
+            event["expect"] = (
+                "Monitor reaction quality and continuation probability. "
+                f"Preferred target: {curr_style.get('preferred_target', 'n/a')} | "
+                f"Min: {curr_style.get('min_target', 'n/a')} | "
+                f"Max: {curr_style.get('max_target', 'n/a')}"
+            )
+            events.append(event)
+
+        if prev_style.get("zone_invalidated", "No") != "Yes" and curr_style.get("zone_invalidated", "No") == "Yes":
+            event = _event_base(
+                reported_at,
+                "entry_style_invalidated",
+                ["Entry Playbook Updates", "Important Updates"],
+                "Entry Playbook",
+                f"Confluence invalidated for {curr_style.get('confluence', 'n/a')}.",
+            )
+            event["before"] = "Zone invalidated: No"
+            event["after"] = "Zone invalidated: Yes"
+            event["why"] = "Price behavior breached confluence validity rules for this setup."
+            event["expect"] = (
+                "Stand down on this confluence and re-anchor to next valid setup. "
+                f"Preferred target was {curr_style.get('preferred_target', 'n/a')} | "
+                f"Min: {curr_style.get('min_target', 'n/a')} | "
+                f"Max: {curr_style.get('max_target', 'n/a')}"
+            )
+            events.append(event)
+
+        if (
+            prev_style
+            and (
+                prev_style.get("suggested_entry", "n/a") != curr_style.get("suggested_entry", "n/a")
+                or prev_style.get("reaction_signal", "None") != curr_style.get("reaction_signal", "None")
+            )
+        ):
+            event = _event_base(
+                reported_at,
+                "entry_style_changed",
+                ["Entry Playbook Updates", "Important Updates"],
+                "Entry Playbook",
+                f"Confirmed entry style changed for {curr_style.get('confluence', 'n/a')}.",
+            )
+            event["before"] = (
+                f"Entry: {prev_style.get('suggested_entry', 'n/a')} | "
+                f"Reaction: {prev_style.get('reaction_signal', 'None')}"
+            )
+            event["after"] = (
+                f"Entry: {curr_style.get('suggested_entry', 'n/a')} | "
+                f"Reaction: {curr_style.get('reaction_signal', 'None')}"
+            )
+            event["event_time"] = curr_style.get("reaction_time", reported_at)
+            event["why"] = curr_style.get("reaction_why", curr_style.get("reason", "n/a"))
+            event["expect"] = (
+                "Adjusted execution plan. "
+                f"Preferred target: {curr_style.get('preferred_target', 'n/a')} | "
+                f"Min: {curr_style.get('min_target', 'n/a')} | "
+                f"Max: {curr_style.get('max_target', 'n/a')}"
+            )
+            events.append(event)
 
     prev_power = prev_snapshot.get("power_hour", {})
     curr_power = curr_snapshot.get("power_hour", {})
@@ -508,6 +686,31 @@ def _build_initial_events(curr_snapshot: Dict[str, Any], now_et: dt.datetime) ->
         event["after"] = entry[0].get("Setup", "No setup")
         event["why"] = "Current confluence/trigger context generated this active playbook view."
         event["expect"] = "Track playbook updates as market structure evolves."
+        events.append(event)
+
+    entry_styles = curr_snapshot.get("entry_styles", {})
+    for _, style in entry_styles.items():
+        event = _event_base(
+            reported_at,
+            "entry_style_baseline",
+            ["Entry Playbook Updates", "Important Updates"],
+            "Entry Playbook",
+            f"Baseline confirmed entry style: {style.get('confluence', 'n/a')} -> {style.get('suggested_entry', 'n/a')}",
+        )
+        event["before"] = "n/a"
+        event["after"] = (
+            f"Entry: {style.get('suggested_entry', 'n/a')} | "
+            f"Tap: {style.get('tap_hit', 'No')} | "
+            f"Midline: {style.get('midline_hit', 'No')} | "
+            f"Invalidated: {style.get('zone_invalidated', 'No')}"
+        )
+        event["why"] = style.get("reason", "n/a")
+        event["expect"] = (
+            "Preferred target: "
+            f"{style.get('preferred_target', 'n/a')} | "
+            f"Min target: {style.get('min_target', 'n/a')} | "
+            f"Max target: {style.get('max_target', 'n/a')}"
+        )
         events.append(event)
 
     power = curr_snapshot.get("power_hour", {})
@@ -951,6 +1154,30 @@ def render_strategy_playbook() -> None:
         st.dataframe(pd.DataFrame(blueprints), use_container_width=True)
     else:
         st.write("No entry playbooks available for current state.")
+
+    st.markdown("### Confluence Entry Style Suggestions")
+    style_rows = playbook.get("confluence_entry_styles", []) or []
+    if style_rows:
+        st.dataframe(pd.DataFrame(style_rows), use_container_width=True)
+    else:
+        st.write("No confluence entry style suggestions available.")
+
+    st.markdown("### Daily Entry Capacity")
+    capacity = playbook.get("daily_entry_capacity", {}) or {}
+    if capacity:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Expected Min", f"{int(capacity.get('expected_min', 0))}")
+        c2.metric("Expected Max", f"{int(capacity.get('expected_max', 0))}")
+        c3.metric("Likely", f"{int(capacity.get('likely', 0))}")
+        c4.metric("Remaining Estimate", f"{int(capacity.get('remaining_estimate', 0))}")
+        st.caption(str(capacity.get("planning_note", "")))
+        st.write(
+            "- End-of-day execution: "
+            f"{capacity.get('eod_execution_status', 'Pending')}"
+        )
+        st.caption(str(capacity.get("eod_execution_note", "")))
+    else:
+        st.write("No daily entry capacity estimate available.")
 
     st.markdown("### Timeframe Playbook")
     tf_rows = playbook.get("timeframe_playbook", [])

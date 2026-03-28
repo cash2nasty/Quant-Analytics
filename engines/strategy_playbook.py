@@ -842,12 +842,390 @@ def _select_reference_confluences(
     return refs
 
 
+def _select_reference_confluence_rows(
+    confluences: List[Dict[str, object]],
+    direction: str,
+    max_items: int = 2,
+) -> List[Dict[str, object]]:
+    if not confluences:
+        return []
+
+    filtered = [c for c in confluences if c.get("Status") != "Invalidated"]
+    if direction == "Bullish":
+        directional = [c for c in filtered if str(c.get("Side", "")).lower() == "bullish"]
+    elif direction == "Bearish":
+        directional = [c for c in filtered if str(c.get("Side", "")).lower() == "bearish"]
+    else:
+        directional = filtered
+
+    candidates = directional if directional else filtered
+    return sorted(
+        candidates,
+        key=lambda x: (not bool(x.get("Top Liquidity", False)), -float(x.get("Liquidity Score", 0.0))),
+    )[:max_items]
+
+
+def _first_zone_tap_time(
+    df: pd.DataFrame,
+    zone_low: float,
+    zone_high: float,
+    formed_time: Optional[str] = None,
+) -> Optional[str]:
+    if df is None or df.empty:
+        return None
+    work = df
+    if formed_time and formed_time != "n/a":
+        formed_ts = pd.to_datetime(formed_time, errors="coerce")
+        if pd.notna(formed_ts):
+            work = work[pd.to_datetime(work["timestamp"]) > formed_ts]
+    hits = work[(work["low"] <= zone_high) & (work["high"] >= zone_low)]
+    if hits.empty:
+        return None
+    return _fmt_ts(pd.to_datetime(hits.iloc[0]["timestamp"]))
+
+
+def _first_midline_hit_time(
+    df: pd.DataFrame,
+    midline: float,
+    formed_time: Optional[str] = None,
+) -> Optional[str]:
+    if df is None or df.empty:
+        return None
+    work = df
+    if formed_time and formed_time != "n/a":
+        formed_ts = pd.to_datetime(formed_time, errors="coerce")
+        if pd.notna(formed_ts):
+            work = work[pd.to_datetime(work["timestamp"]) > formed_ts]
+    hits = work[(work["low"] <= midline) & (work["high"] >= midline)]
+    if hits.empty:
+        return None
+    return _fmt_ts(pd.to_datetime(hits.iloc[0]["timestamp"]))
+
+
+def _entry_style_target_prices(
+    target_ladder: List[Dict[str, object]],
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    prices: List[float] = []
+    for t in target_ladder[:8]:
+        try:
+            prices.append(float(t.get("Price")))
+        except Exception:
+            continue
+
+    if not prices:
+        return None, None, None
+
+    preferred = prices[0]
+    minimum = min(prices)
+    maximum = max(prices)
+    return preferred, minimum, maximum
+
+
+def _analyze_zone_reaction_candles(
+    df: pd.DataFrame,
+    zone_low: float,
+    zone_high: float,
+    side: str,
+    lookahead_bars: int = 3,
+) -> Dict[str, object]:
+    if df is None or df.empty:
+        return {
+            "signal": "None",
+            "score": 0.0,
+            "reason": "No intraday bars available for reaction analysis.",
+            "event_time": "n/a",
+        }
+
+    work = df.copy().sort_values("timestamp").reset_index(drop=True)
+    touches = work[(work["low"] <= zone_high) & (work["high"] >= zone_low)]
+    if touches.empty:
+        return {
+            "signal": "None",
+            "score": 0.0,
+            "reason": "Zone has not been touched yet.",
+            "event_time": "n/a",
+        }
+
+    bullish = str(side).lower() == "bullish"
+    best_score = -1.0
+    best = {
+        "signal": "None",
+        "score": 0.0,
+        "reason": "No qualifying reaction candle found yet.",
+        "event_time": "n/a",
+    }
+
+    for idx in touches.index[:5]:
+        row = work.iloc[idx]
+        o = _safe_float(row.get("open"))
+        h = _safe_float(row.get("high"))
+        l = _safe_float(row.get("low"))
+        c = _safe_float(row.get("close"))
+        rng = max(h - l, 1e-6)
+        body = abs(c - o)
+        lower_wick = min(o, c) - l
+        upper_wick = h - max(o, c)
+
+        engulfing = False
+        rejection = False
+        rejection_score = 0.0
+        engulfing_score = 0.0
+
+        if idx > 0:
+            prev = work.iloc[idx - 1]
+            po = _safe_float(prev.get("open"))
+            pc = _safe_float(prev.get("close"))
+            if bullish:
+                engulfing = (c > o) and (pc < po) and (o <= pc) and (c >= po)
+            else:
+                engulfing = (c < o) and (pc > po) and (o >= pc) and (c <= po)
+            if engulfing:
+                engulfing_score = 35.0
+
+        if bullish:
+            wick_ok = lower_wick >= max(0.8 * body, 0.20 * rng)
+            close_away = c >= (zone_low + zone_high) / 2.0
+            color_ok = c >= o
+            rejection = wick_ok and close_away and color_ok
+            if rejection:
+                rejection_score = 30.0
+        else:
+            wick_ok = upper_wick >= max(0.8 * body, 0.20 * rng)
+            close_away = c <= (zone_low + zone_high) / 2.0
+            color_ok = c <= o
+            rejection = wick_ok and close_away and color_ok
+            if rejection:
+                rejection_score = 30.0
+
+        end_idx = min(idx + max(1, lookahead_bars), len(work) - 1)
+        forward = work.iloc[idx : end_idx + 1]
+        if bullish:
+            departure_points = max(_safe_float(forward["high"].max()) - c, 0.0)
+        else:
+            departure_points = max(c - _safe_float(forward["low"].min()), 0.0)
+        departure_score = min(35.0, departure_points * 4.0)
+
+        score = min(100.0, engulfing_score + rejection_score + departure_score)
+        if score > best_score:
+            best_score = score
+            signal = "None"
+            if engulfing and rejection:
+                signal = "Engulfing + Rejection"
+            elif engulfing:
+                signal = "Engulfing"
+            elif rejection:
+                signal = "Rejection"
+
+            best = {
+                "signal": signal,
+                "score": round(score, 1),
+                "reason": (
+                    f"{signal} reaction with departure strength {departure_points:.2f} points "
+                    f"over next {max(1, lookahead_bars)} bars."
+                    if signal != "None"
+                    else f"Touch occurred but no clear engulfing/rejection; departure {departure_points:.2f} points."
+                ),
+                "event_time": _fmt_ts(pd.to_datetime(row["timestamp"])) or "n/a",
+            }
+
+    return best
+
+
+def _suggest_confluence_entry_styles(
+    reference_rows: List[Dict[str, object]],
+    df: pd.DataFrame,
+    target_ladder: List[Dict[str, object]],
+    mode: str,
+    whipsaw_risk: bool,
+) -> List[Dict[str, object]]:
+    suggestions: List[Dict[str, object]] = []
+    preferred_tgt, min_tgt, max_tgt = _entry_style_target_prices(target_ladder)
+    for row in reference_rows:
+        name = str(row.get("Confluence", "n/a"))
+        name_l = name.lower()
+        low = float(row.get("Price Low", 0.0))
+        high = float(row.get("Price High", 0.0))
+        mid = (low + high) / 2.0
+        width = abs(high - low)
+        status = str(row.get("Status", "Fresh"))
+        formed_time = str(row.get("Formed Time", "n/a"))
+
+        tap_time = _first_zone_tap_time(df, low, high, formed_time=formed_time)
+        midline_time = _first_midline_hit_time(df, mid, formed_time=formed_time)
+        tap_hit = tap_time is not None
+        midline_hit = midline_time is not None
+        invalidated = status == "Invalidated"
+
+        zone_kind = "Other"
+        if "fvg" in name_l:
+            zone_kind = "FVG"
+        elif "ob" in name_l or "order block" in name_l:
+            zone_kind = "OB"
+        elif "bb" in name_l or "breaker" in name_l:
+            zone_kind = "BB"
+
+        style = "First Tap"
+        reason = "Momentum context favors immediate reaction entries."
+
+        reaction = _analyze_zone_reaction_candles(
+            df=df,
+            zone_low=low,
+            zone_high=high,
+            side=str(row.get("Side", "")),
+            lookahead_bars=3,
+        )
+        reaction_signal = str(reaction.get("signal", "None"))
+        reaction_score = float(reaction.get("score", 0.0) or 0.0)
+        reaction_reason = str(reaction.get("reason", "n/a"))
+        reaction_time = str(reaction.get("event_time", "n/a"))
+
+        if zone_kind == "FVG":
+            style = "Midline"
+            reason = "FVG setups typically improve fill quality near the 50% balance point."
+        elif zone_kind in {"OB", "BB"}:
+            style = "First Tap"
+            reason = "OB/BB zones often react on first contact during directional conditions."
+
+        if status in {"Retested", "Tested"}:
+            style = "Midline"
+            reason = "Zone has already been interacted with; waiting for midline can reduce weak edge taps."
+
+        if whipsaw_risk or mode == "Whipsaw Risk":
+            style = "Midline"
+            reason = "Whipsaw conditions favor more selective pricing over immediate touch entries."
+
+        if width < 1.5 and style == "Midline":
+            style = "First Tap"
+            reason = "Zone is narrow enough that midline and tap fills are effectively equivalent."
+
+        # Adaptive FVG mode: strong reaction at touch prioritizes participation over perfect fill.
+        if zone_kind == "FVG":
+            if reaction_score >= 70.0 and reaction_signal in {"Engulfing", "Rejection", "Engulfing + Rejection"}:
+                style = "First Tap"
+                reason = f"Strong {reaction_signal.lower()} reaction detected at the zone ({reaction_score:.1f} score)."
+            elif 45.0 <= reaction_score < 70.0 and reaction_signal in {"Engulfing", "Rejection", "Engulfing + Rejection"}:
+                style = "Split (Tap + Midline)"
+                reason = f"Moderate {reaction_signal.lower()} reaction suggests partial fill at tap and add near midline."
+
+        if preferred_tgt is not None:
+            exit_plan = f"Scale at preferred target {preferred_tgt:.2f}; extend toward {max_tgt:.2f}."
+        else:
+            exit_plan = "Use nearest qualified ladder target; exit early on invalidation."
+
+        suggestions.append(
+            {
+                "Confluence": name,
+                "Kind": zone_kind,
+                "Status": status,
+                "Formed Time": formed_time,
+                "Suggested Entry": style,
+                "First Tap Price": round(low if "bullish" in name_l else high, 2),
+                "Midline Price": round(mid, 2),
+                "Tap Hit": "Yes" if tap_hit else "No",
+                "Tap Time": tap_time or "n/a",
+                "Midline Hit": "Yes" if midline_hit else "No",
+                "Midline Time": midline_time or "n/a",
+                "Zone Invalidated": "Yes" if invalidated else "No",
+                "Exit": exit_plan,
+                "Reaction Signal": reaction_signal,
+                "Reaction Score": round(reaction_score, 1),
+                "Reaction Time": reaction_time,
+                "Reaction Why": reaction_reason,
+                "Preferred Target Price": round(preferred_tgt, 2) if preferred_tgt is not None else None,
+                "Minimum Target Price": round(min_tgt, 2) if min_tgt is not None else None,
+                "Maximum Target Price": round(max_tgt, 2) if max_tgt is not None else None,
+                "Reason": reason,
+            }
+        )
+    return suggestions
+
+
+def _estimate_daily_entry_capacity(
+    mode: str,
+    direction: str,
+    trade_today: str,
+    confidence: float,
+    reference_rows: List[Dict[str, object]],
+    primary_trigger: Optional[Dict[str, object]],
+    now: dt.datetime,
+    windows: Dict[str, Dict[str, dt.datetime]],
+) -> Dict[str, object]:
+    us_start = windows.get("US", {}).get("start")
+    us_end = windows.get("US", {}).get("end")
+
+    if trade_today == "No":
+        return {
+            "expected_min": 0,
+            "expected_max": 0,
+            "likely": 0,
+            "remaining_estimate": 0,
+            "planning_note": "Trade-today decision is No, so no entries are planned.",
+            "eod_execution_status": "Not Executed",
+            "eod_execution_note": "Trade-today decision prevented execution.",
+        }
+
+    min_e, max_e = 0, 2
+    if mode in {"AMD", "NY Continuation"} and direction in {"Bullish", "Bearish"}:
+        min_e, max_e = 1, 3
+    elif mode == "Whipsaw Risk":
+        min_e, max_e = 0, 1
+
+    if direction not in {"Bullish", "Bearish"}:
+        min_e = 0
+        max_e = min(max_e, 2)
+
+    top_liq_count = sum(1 for r in reference_rows if bool(r.get("Top Liquidity", False)))
+    if top_liq_count >= 2 and mode != "Whipsaw Risk":
+        max_e = min(max_e + 1, 4)
+
+    if primary_trigger is not None and trade_today in {"Yes", "Wait"}:
+        min_e = max(min_e, 1)
+
+    if us_start and now < us_start:
+        note = "Pre-US open estimate based on mode, directional alignment, and confluence quality."
+        eod_status = "Pending"
+        eod_note = "Session is not complete yet."
+    elif us_end and now > us_end:
+        if primary_trigger is None:
+            min_e, max_e = 0, 0
+            note = "US session has ended without a trigger; no additional entries expected."
+            eod_status = "Not Executed"
+            eod_note = "No qualifying trigger was confirmed by session close."
+        else:
+            min_e, max_e = min(min_e, 1), min(max_e, 1)
+            note = "US session is largely complete; at most one late opportunity remains."
+            eod_status = "Executed"
+            eod_note = "A qualifying trigger fired during session hours."
+    else:
+        note = "In-session estimate adjusts as trigger state and confluence validity evolve."
+        eod_status = "Pending"
+        eod_note = "Waiting for end-of-day session close to finalize execution status."
+
+    if confidence >= 0.70:
+        likely = min(max(min_e + 1, min_e), max_e)
+    elif confidence <= 0.55:
+        likely = min_e
+    else:
+        likely = min(min_e + 1, max_e)
+
+    return {
+        "expected_min": int(min_e),
+        "expected_max": int(max_e),
+        "likely": int(likely),
+        "remaining_estimate": int(max_e),
+        "planning_note": note,
+        "eod_execution_status": eod_status,
+        "eod_execution_note": eod_note,
+    }
+
+
 def _entry_blueprints(
     mode: str,
     direction: str,
     windows: Dict[str, Dict[str, dt.datetime]],
     reference_confluences: List[str],
     vwap_levels: List[Dict[str, object]],
+    entry_style_suggestions: Optional[List[Dict[str, object]]] = None,
 ) -> List[Dict[str, str]]:
     us_start = windows.get("US", {}).get("start")
     us_end = windows.get("US", {}).get("end")
@@ -861,12 +1239,20 @@ def _entry_blueprints(
             daily_vwap_label = str(v.get("Name"))
             break
 
+    primary_style = "First Tap"
+    primary_style_reason = "Use default confluence tap execution."
+    if entry_style_suggestions:
+        primary_style = str(entry_style_suggestions[0].get("Suggested Entry", primary_style))
+        primary_style_reason = str(entry_style_suggestions[0].get("Reason", primary_style_reason))
+
     if mode == "Whipsaw Risk":
         return [
             {
                 "Setup": "Risk-Off / Two-Sided",
                 "IfThen": f"If price keeps crossing around {daily_vwap_label} and cannot hold either side of OR, then avoid directional entries.",
                 "Trigger": "Use only exceptional reclaim/reject + structure alignment at high-liquidity confluence.",
+                "Confluence Entry": primary_style,
+                "Entry Reason": primary_style_reason,
                 "Execution TF": "5m",
                 "Session": us_window,
             }
@@ -880,6 +1266,8 @@ def _entry_blueprints(
             "Setup": "VWAP Acceptance",
             "IfThen": f"If price retests {daily_vwap_label} and holds the {direction.lower()} side near {primary_confluence}, then look for {direction_word} continuation.",
             "Trigger": f"VWAP reclaim/reject hold + 1m structure confirmation while staying {opposite} invalidation side.",
+            "Confluence Entry": primary_style,
+            "Entry Reason": primary_style_reason,
             "Execution TF": "1m",
             "Session": us_window,
         },
@@ -887,6 +1275,8 @@ def _entry_blueprints(
             "Setup": "OR Retest",
             "IfThen": f"If OR break aligns {direction.lower()} and retest holds into {secondary_confluence}, then execute continuation.",
             "Trigger": "ORB or Failed ORB confirmation.",
+            "Confluence Entry": primary_style,
+            "Entry Reason": primary_style_reason,
             "Execution TF": "1m-5m",
             "Session": "09:30-11:30 ET",
         },
@@ -899,6 +1289,8 @@ def _entry_blueprints(
                 "Setup": "AMD Reversal",
                 "IfThen": f"If London sweep is rejected and US reclaims through {primary_confluence}, then look for {direction_word} toward opposite liquidity.",
                 "Trigger": "Sweep rejection + reclaim + micro BOS/CHOCH.",
+                "Confluence Entry": primary_style,
+                "Entry Reason": primary_style_reason,
                 "Execution TF": "1m",
                 "Session": "09:30-12:00 ET",
             },
@@ -911,6 +1303,8 @@ def _entry_blueprints(
                 "Setup": "NY Continuation Pullback",
                 "IfThen": f"If price pulls back to {primary_confluence} and holds with {daily_vwap_label} support/resistance, then execute {direction_word}.",
                 "Trigger": "Retest hold + momentum re-expansion.",
+                "Confluence Entry": primary_style,
+                "Entry Reason": primary_style_reason,
                 "Execution TF": "1m-5m",
                 "Session": us_window,
             },
@@ -1259,13 +1653,32 @@ def build_strategy_playbook(
             "Avoid first impulsive candle chase; prefer retest confirmation.",
         ]
 
+    reference_rows = _select_reference_confluence_rows(confluences, ny_direction, max_items=2)
     reference_confluences = _select_reference_confluences(confluences, ny_direction, max_items=2)
+    entry_style_suggestions = _suggest_confluence_entry_styles(
+        reference_rows,
+        df=df,
+        target_ladder=target_ladder,
+        mode=ny_mode,
+        whipsaw_risk=whipsaw_risk,
+    )
     entry_blueprints = _entry_blueprints(
         ny_mode,
         ny_direction,
         windows,
         reference_confluences=reference_confluences,
         vwap_levels=vwap_levels,
+        entry_style_suggestions=entry_style_suggestions,
+    )
+    daily_entry_capacity = _estimate_daily_entry_capacity(
+        mode=ny_mode,
+        direction=ny_direction,
+        trade_today=trade_today,
+        confidence=float(confidence),
+        reference_rows=reference_rows,
+        primary_trigger=primary_trigger,
+        now=now,
+        windows=windows,
     )
     open_pattern_watch = _us_open_reclaim_watch(df=df, trade_date=trade_date, now=now, confluences=confluences)
 
@@ -1293,6 +1706,8 @@ def build_strategy_playbook(
             "entries": power_hour_entries,
         },
         "entry_blueprints": entry_blueprints,
+        "confluence_entry_styles": entry_style_suggestions,
+        "daily_entry_capacity": daily_entry_capacity,
         "timeframe_playbook": _timeframe_playbook(ny_mode),
         "open_pattern_watch": open_pattern_watch,
         "market_snapshot": {
