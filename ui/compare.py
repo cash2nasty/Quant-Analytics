@@ -162,92 +162,125 @@ def render_compare():
     st.header("Compare Days")
 
     summaries = load_all_summaries()
-    if len(summaries) < 2:
-        st.info("Need at least two saved days to compare.")
-        return
+    has_saved = len(summaries) >= 2
+    source_mode = st.radio(
+        "Comparison source",
+        ["Saved history days", "Any dates (recompute)"],
+        horizontal=True,
+    )
 
-    labels = [f"{s.date} | {s.symbol}" for s in summaries]
+    left_symbol = "NQH26"
+    right_symbol = "NQH26"
+    left_date = None
+    right_date = None
 
-    col1, col2 = st.columns(2)
-    with col1:
-        left_label = st.selectbox("Left Day", labels, index=0)
-    with col2:
-        right_label = st.selectbox("Right Day", labels, index=1)
+    if source_mode == "Saved history days":
+        if not has_saved:
+            st.info("Need at least two saved days for this mode. Switch to 'Any dates (recompute)'.")
+            return
 
-    if left_label == right_label:
-        st.warning("Select two different days.")
-        return
+        labels = [f"{s.date} | {s.symbol}" for s in summaries]
+        col1, col2 = st.columns(2)
+        with col1:
+            left_label = st.selectbox("Left Day", labels, index=0)
+        with col2:
+            right_label = st.selectbox("Right Day", labels, index=1)
 
-    left = summaries[labels.index(left_label)]
-    right = summaries[labels.index(right_label)]
+        if left_label == right_label:
+            st.warning("Select two different days.")
+            return
 
-    c1, c2 = st.columns(2)
+        left = summaries[labels.index(left_label)]
+        right = summaries[labels.index(right_label)]
+        left_symbol, right_symbol = left.symbol, right.symbol
+        left_date, right_date = left.date, right.date
 
-    with c1:
-        st.subheader(f"{left.date} ({left.symbol})")
-        st.markdown("**Bias**")
-        st.write(f"Daily: {left.bias.daily_bias} ({left.bias.daily_confidence:.0%})")
-        us30_left = getattr(left.bias, "us_open_bias_30", None) or left.bias.us_open_bias
-        us60_left = getattr(left.bias, "us_open_bias_60", None) or left.bias.us_open_bias
-        us30_left_conf = getattr(left.bias, "us_open_confidence_30", None)
-        us60_left_conf = getattr(left.bias, "us_open_confidence_60", None)
-        if us30_left_conf is None:
-            us30_left_conf = left.bias.us_open_confidence
-        if us60_left_conf is None:
-            us60_left_conf = left.bias.us_open_confidence
-        st.write(f"US 30m: {us30_left} ({us30_left_conf:.0%})")
-        st.write(f"US 60m: {us60_left} ({us60_left_conf:.0%})")
-        st.markdown("**Patterns**")
-        st.write(f"London Breakout: {left.patterns.london_breakout}")
-        st.write(f"Whipsaw: {left.patterns.whipsaw}")
-        st.write(f"Trend Day: {left.patterns.trend_day}")
-        st.write(f"Vol Expansion: {left.patterns.volatility_expansion}")
-        st.markdown("**Accuracy**")
-        st.write(f"Actual: {left.accuracy.actual_direction}")
-        st.write(f"Correct: {left.accuracy.bias_correct}")
-        st.write(f"Used Bias: {getattr(left.accuracy,'used_bias', 'n/a')}")
-        st.write(f"US Open Correct 30m: {getattr(left.accuracy,'us_open_bias_correct_30', 'n/a')}")
-        st.write(f"US Open Correct 60m: {getattr(left.accuracy,'us_open_bias_correct_60', 'n/a')}")
+        c1, c2 = st.columns(2)
 
-    with c2:
-        st.subheader(f"{right.date} ({right.symbol})")
-        st.markdown("**Bias**")
-        st.write(f"Daily: {right.bias.daily_bias} ({right.bias.daily_confidence:.0%})")
-        us30_right = getattr(right.bias, "us_open_bias_30", None) or right.bias.us_open_bias
-        us60_right = getattr(right.bias, "us_open_bias_60", None) or right.bias.us_open_bias
-        us30_right_conf = getattr(right.bias, "us_open_confidence_30", None)
-        us60_right_conf = getattr(right.bias, "us_open_confidence_60", None)
-        if us30_right_conf is None:
-            us30_right_conf = right.bias.us_open_confidence
-        if us60_right_conf is None:
-            us60_right_conf = right.bias.us_open_confidence
-        st.write(f"US 30m: {us30_right} ({us30_right_conf:.0%})")
-        st.write(f"US 60m: {us60_right} ({us60_right_conf:.0%})")
-        st.markdown("**Patterns**")
-        st.write(f"London Breakout: {right.patterns.london_breakout}")
-        st.write(f"Whipsaw: {right.patterns.whipsaw}")
-        st.write(f"Trend Day: {right.patterns.trend_day}")
-        st.write(f"Vol Expansion: {right.patterns.volatility_expansion}")
-        st.markdown("**Accuracy**")
-        st.write(f"Actual: {right.accuracy.actual_direction}")
-        st.write(f"Correct: {right.accuracy.bias_correct}")
-        st.write(f"Used Bias: {getattr(right.accuracy,'used_bias', 'n/a')}")
-        st.write(f"US Open Correct 30m: {getattr(right.accuracy,'us_open_bias_correct_30', 'n/a')}")
-        st.write(f"US Open Correct 60m: {getattr(right.accuracy,'us_open_bias_correct_60', 'n/a')}")
+        with c1:
+            st.subheader(f"{left.date} ({left.symbol})")
+            st.markdown("**Bias**")
+            st.write(f"Daily: {left.bias.daily_bias} ({left.bias.daily_confidence:.0%})")
+            us30_left = getattr(left.bias, "us_open_bias_30", None) or left.bias.us_open_bias
+            us60_left = getattr(left.bias, "us_open_bias_60", None) or left.bias.us_open_bias
+            us30_left_conf = getattr(left.bias, "us_open_confidence_30", None)
+            us60_left_conf = getattr(left.bias, "us_open_confidence_60", None)
+            if us30_left_conf is None:
+                us30_left_conf = left.bias.us_open_confidence
+            if us60_left_conf is None:
+                us60_left_conf = left.bias.us_open_confidence
+            st.write(f"US 30m: {us30_left} ({us30_left_conf:.0%})")
+            st.write(f"US 60m: {us60_left} ({us60_left_conf:.0%})")
+            st.markdown("**Patterns**")
+            st.write(f"London Breakout: {left.patterns.london_breakout}")
+            st.write(f"Whipsaw: {left.patterns.whipsaw}")
+            st.write(f"Trend Day: {left.patterns.trend_day}")
+            st.write(f"Vol Expansion: {left.patterns.volatility_expansion}")
+            st.markdown("**Accuracy**")
+            st.write(f"Actual: {left.accuracy.actual_direction}")
+            st.write(f"Correct: {left.accuracy.bias_correct}")
+            st.write(f"Used Bias: {getattr(left.accuracy,'used_bias', 'n/a')}")
+            st.write(f"US Open Correct 30m: {getattr(left.accuracy,'us_open_bias_correct_30', 'n/a')}")
+            st.write(f"US Open Correct 60m: {getattr(left.accuracy,'us_open_bias_correct_60', 'n/a')}")
+
+        with c2:
+            st.subheader(f"{right.date} ({right.symbol})")
+            st.markdown("**Bias**")
+            st.write(f"Daily: {right.bias.daily_bias} ({right.bias.daily_confidence:.0%})")
+            us30_right = getattr(right.bias, "us_open_bias_30", None) or right.bias.us_open_bias
+            us60_right = getattr(right.bias, "us_open_bias_60", None) or right.bias.us_open_bias
+            us30_right_conf = getattr(right.bias, "us_open_confidence_30", None)
+            us60_right_conf = getattr(right.bias, "us_open_confidence_60", None)
+            if us30_right_conf is None:
+                us30_right_conf = right.bias.us_open_confidence
+            if us60_right_conf is None:
+                us60_right_conf = right.bias.us_open_confidence
+            st.write(f"US 30m: {us30_right} ({us30_right_conf:.0%})")
+            st.write(f"US 60m: {us60_right} ({us60_right_conf:.0%})")
+            st.markdown("**Patterns**")
+            st.write(f"London Breakout: {right.patterns.london_breakout}")
+            st.write(f"Whipsaw: {right.patterns.whipsaw}")
+            st.write(f"Trend Day: {right.patterns.trend_day}")
+            st.write(f"Vol Expansion: {right.patterns.volatility_expansion}")
+            st.markdown("**Accuracy**")
+            st.write(f"Actual: {right.accuracy.actual_direction}")
+            st.write(f"Correct: {right.accuracy.bias_correct}")
+            st.write(f"Used Bias: {getattr(right.accuracy,'used_bias', 'n/a')}")
+            st.write(f"US Open Correct 30m: {getattr(right.accuracy,'us_open_bias_correct_30', 'n/a')}")
+            st.write(f"US Open Correct 60m: {getattr(right.accuracy,'us_open_bias_correct_60', 'n/a')}")
+    else:
+        default_symbol = summaries[-1].symbol if summaries else "NQH26"
+        today = dt.date.today()
+        c0, c1, c2 = st.columns([2, 1, 1])
+        with c0:
+            symbol = st.text_input("Symbol", value=default_symbol)
+        with c1:
+            left_date_input = st.date_input("Left date", value=today - dt.timedelta(days=1))
+        with c2:
+            right_date_input = st.date_input("Right date", value=today - dt.timedelta(days=2))
+
+        if left_date_input == right_date_input:
+            st.warning("Select two different dates.")
+            return
+
+        left_symbol = right_symbol = symbol
+        left_date = left_date_input.isoformat()
+        right_date = right_date_input.isoformat()
+        st.caption("Dates are recomputed from raw intraday data and do not need to be saved in history first.")
 
     st.markdown("### End-of-Day NQ Opportunity (Entry -> Targets)")
     st.caption(
         "Tick math uses NQ tick size 0.25. Dollar conversion: 1 contract = $5/tick, 2 contracts = $10/tick."
     )
 
-    left_opp = _compute_day_opportunity(left.symbol, left.date)
-    right_opp = _compute_day_opportunity(right.symbol, right.date)
+    left_opp = _compute_day_opportunity(left_symbol, left_date)
+    right_opp = _compute_day_opportunity(right_symbol, right_date)
 
     o1, o2 = st.columns(2)
     with o1:
-        _render_opportunity_block(f"{left.date} ({left.symbol})", left_opp)
+        _render_opportunity_block(f"{left_date} ({left_symbol})", left_opp)
     with o2:
-        _render_opportunity_block(f"{right.date} ({right.symbol})", right_opp)
+        _render_opportunity_block(f"{right_date} ({right_symbol})", right_opp)
 
     if not left_opp.get("error") and not right_opp.get("error"):
         st.markdown("**Comparison Delta (Left - Right)**")

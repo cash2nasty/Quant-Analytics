@@ -258,6 +258,7 @@ def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
             "reaction_score": row.get("Reaction Score"),
             "reaction_time": str(row.get("Reaction Time", "n/a")),
             "reaction_why": str(row.get("Reaction Why", "n/a")),
+            "entry_style_reason": str(row.get("Entry Style Reason", row.get("Reason", "n/a"))),
             "reason": str(row.get("Reason", "n/a")),
         }
 
@@ -417,6 +418,7 @@ def _build_update_events(prev_snapshot: Dict[str, Any], curr_snapshot: Dict[str,
                 f"Entry: {curr_style.get('suggested_entry', 'n/a')} | Exit: {curr_style.get('exit', 'n/a')}"
             )
             event["why"] = curr_style.get("reason", "n/a")
+            event["entry_style_reason"] = curr_style.get("entry_style_reason", curr_style.get("reason", "n/a"))
             event["expect"] = (
                 "Preferred target: "
                 f"{curr_style.get('preferred_target', 'n/a')} | "
@@ -437,6 +439,7 @@ def _build_update_events(prev_snapshot: Dict[str, Any], curr_snapshot: Dict[str,
             event["before"] = "Tap status: No"
             event["after"] = f"Tap status: Yes @ {curr_style.get('tap_time', 'n/a')}"
             event["why"] = "Price entered the confluence boundaries and activated touch condition."
+            event["entry_style_reason"] = curr_style.get("entry_style_reason", curr_style.get("reason", "n/a"))
             event["expect"] = (
                 "Watch follow-through toward targets. "
                 f"Preferred target: {curr_style.get('preferred_target', 'n/a')} | "
@@ -457,6 +460,7 @@ def _build_update_events(prev_snapshot: Dict[str, Any], curr_snapshot: Dict[str,
             event["before"] = "Midline status: No"
             event["after"] = f"Midline status: Yes @ {curr_style.get('midline_time', 'n/a')}"
             event["why"] = "Midline threshold was touched inside the active confluence zone."
+            event["entry_style_reason"] = curr_style.get("entry_style_reason", curr_style.get("reason", "n/a"))
             event["expect"] = (
                 "Monitor reaction quality and continuation probability. "
                 f"Preferred target: {curr_style.get('preferred_target', 'n/a')} | "
@@ -476,6 +480,7 @@ def _build_update_events(prev_snapshot: Dict[str, Any], curr_snapshot: Dict[str,
             event["before"] = "Zone invalidated: No"
             event["after"] = "Zone invalidated: Yes"
             event["why"] = "Price behavior breached confluence validity rules for this setup."
+            event["entry_style_reason"] = curr_style.get("entry_style_reason", curr_style.get("reason", "n/a"))
             event["expect"] = (
                 "Stand down on this confluence and re-anchor to next valid setup. "
                 f"Preferred target was {curr_style.get('preferred_target', 'n/a')} | "
@@ -508,6 +513,7 @@ def _build_update_events(prev_snapshot: Dict[str, Any], curr_snapshot: Dict[str,
             )
             event["event_time"] = curr_style.get("reaction_time", reported_at)
             event["why"] = curr_style.get("reaction_why", curr_style.get("reason", "n/a"))
+            event["entry_style_reason"] = curr_style.get("entry_style_reason", curr_style.get("reason", "n/a"))
             event["expect"] = (
                 "Adjusted execution plan. "
                 f"Preferred target: {curr_style.get('preferred_target', 'n/a')} | "
@@ -705,6 +711,7 @@ def _build_initial_events(curr_snapshot: Dict[str, Any], now_et: dt.datetime) ->
             f"Invalidated: {style.get('zone_invalidated', 'No')}"
         )
         event["why"] = style.get("reason", "n/a")
+        event["entry_style_reason"] = style.get("entry_style_reason", style.get("reason", "n/a"))
         event["expect"] = (
             "Preferred target: "
             f"{style.get('preferred_target', 'n/a')} | "
@@ -828,6 +835,8 @@ def _render_market_updates_panel(events: List[Dict[str, Any]], panel_key: str = 
             st.write(f"**Before:** {event.get('before', 'n/a')}")
             st.write(f"**After:** {event.get('after', 'n/a')}")
             st.write(f"**Why:** {event.get('why', 'n/a')}")
+            if selected_one == "Entry Playbook Updates" and event.get("entry_style_reason"):
+                st.write(f"**Entry style reasoning:** {event.get('entry_style_reason', 'n/a')}")
             st.write(f"**What to expect:** {event.get('expect', 'n/a')}")
             st.markdown('</div>', unsafe_allow_html=True)
             continue

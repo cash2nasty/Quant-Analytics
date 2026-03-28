@@ -12,6 +12,7 @@ from engines.zones import (
     is_fvg_inversed,
     is_zone_failed,
     is_zone_touched,
+    zone_formed_timestamp,
     zone_liquidity_scores,
 )
 from indicators.moving_averages import compute_anchored_vwap, compute_daily_vwap, compute_weekly_vwap
@@ -707,7 +708,8 @@ def _us_open_reclaim_watch(
 def _zone_touch_times(df: pd.DataFrame, zone: Zone) -> Tuple[Optional[str], Optional[str], int]:
     if df is None or df.empty:
         return None, None, 0
-    after = df[df["timestamp"] > zone.start]
+    formed_ts = zone_formed_timestamp(zone)
+    after = df[df["timestamp"] > formed_ts]
     if after.empty:
         return None, None, 0
     hits = after[(after["low"] <= zone.high) & (after["high"] >= zone.low)]
@@ -1134,6 +1136,7 @@ def _suggest_confluence_entry_styles(
                 "Preferred Target Price": round(preferred_tgt, 2) if preferred_tgt is not None else None,
                 "Minimum Target Price": round(min_tgt, 2) if min_tgt is not None else None,
                 "Maximum Target Price": round(max_tgt, 2) if max_tgt is not None else None,
+                "Entry Style Reason": reason,
                 "Reason": reason,
             }
         )
@@ -1576,7 +1579,7 @@ def build_strategy_playbook(
                 "Confluence": f"{z.timeframe} {z.kind} {z.side}",
                 "Price Low": float(z.low),
                 "Price High": float(z.high),
-                "Formed Time": _fmt_ts(z.start),
+                "Formed Time": _fmt_ts(zone_formed_timestamp(z)),
                 "First Test": first_test,
                 "Retest Time": retest_time,
                 "Retest Count": int(retest_count),

@@ -298,6 +298,32 @@ def _timeframe_rule(timeframe: str) -> str:
     return mapping.get(timeframe, "1H")
 
 
+def _timeframe_minutes(timeframe: str) -> int:
+    tf = str(timeframe or "").strip().lower()
+    if tf == "4h":
+        return 240
+    if tf == "1h":
+        return 60
+    if tf == "30m":
+        return 30
+    if tf == "15m":
+        return 15
+    return 60
+
+
+def zone_formed_timestamp(zone: Zone) -> pd.Timestamp:
+    # Formation completion time (not first candle time):
+    # - FVG uses c1 and c3, so completion is roughly 2 bars after start.
+    # - Order block confirmation uses c3 displacement, so completion is roughly 3 bars after start.
+    # - Breaker already uses the break timestamp as start.
+    minutes = _timeframe_minutes(zone.timeframe)
+    if zone.kind == "fvg":
+        return pd.to_datetime(zone.start) + pd.Timedelta(minutes=2 * minutes)
+    if zone.kind == "order_block":
+        return pd.to_datetime(zone.start) + pd.Timedelta(minutes=3 * minutes)
+    return pd.to_datetime(zone.start)
+
+
 def zone_liquidity_scores(df: pd.DataFrame, zone: Zone) -> tuple:
     if df is None or df.empty:
         return (0.0, 0.0)
@@ -350,7 +376,8 @@ def score_zone_setup(
 def is_zone_touched(df: pd.DataFrame, zone: Zone) -> bool:
     if df is None or df.empty:
         return False
-    after = df[df["timestamp"] > zone.start]
+    formed_ts = zone_formed_timestamp(zone)
+    after = df[df["timestamp"] > formed_ts]
     if after.empty:
         return False
     touched = after[(after["low"] <= zone.high) & (after["high"] >= zone.low)]
@@ -365,7 +392,8 @@ def is_fvg_inversed(df: pd.DataFrame, zone: Zone) -> bool:
     rs = resample_ohlcv(df, _timeframe_rule(zone.timeframe))
     if rs.empty:
         return False
-    after = rs[rs["timestamp"] > zone.start]
+    formed_ts = zone_formed_timestamp(zone)
+    after = rs[rs["timestamp"] > formed_ts]
     if after.empty:
         return False
     if zone.side == "bullish":
@@ -381,7 +409,8 @@ def is_zone_failed(df: pd.DataFrame, zone: Zone) -> bool:
     rs = resample_ohlcv(df, _timeframe_rule(zone.timeframe))
     if rs.empty:
         return False
-    after = rs[rs["timestamp"] > zone.start]
+    formed_ts = zone_formed_timestamp(zone)
+    after = rs[rs["timestamp"] > formed_ts]
     if after.empty:
         return False
     if zone.side == "bullish":
@@ -402,7 +431,8 @@ def filter_untouched_zones(df: pd.DataFrame, zones: List[Zone]) -> List[Zone]:
 def find_rejection_candles(df: pd.DataFrame, zone: Zone) -> List[pd.Timestamp]:
     if df is None or df.empty:
         return []
-    after = df[df["timestamp"] > zone.start]
+    formed_ts = zone_formed_timestamp(zone)
+    after = df[df["timestamp"] > formed_ts]
     if after.empty:
         return []
     hits: List[pd.Timestamp] = []
