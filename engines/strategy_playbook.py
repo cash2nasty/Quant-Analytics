@@ -1,6 +1,8 @@
 import datetime as dt
+import math
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 from data.session_reference import get_session_windows_for_date
@@ -42,17 +44,22 @@ def _first_after(df: pd.DataFrame, mask: pd.Series) -> Optional[Tuple[pd.Timesta
 def _detect_orb_trigger(df: pd.DataFrame, minutes: int) -> Optional[Dict[str, object]]:
     if df is None or df.empty:
         return None
-    date = pd.to_datetime(df["timestamp"].iloc[0]).date()
+    work = df.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"])
+    date = pd.to_datetime(work["timestamp"].iloc[-1]).date()
+    work = work[work["timestamp"].dt.date == date]
+    if work.empty:
+        return None
     start = pd.Timestamp.combine(date, pd.Timestamp("09:30").time())
     end = start + pd.Timedelta(minutes=minutes)
-    opening = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+    opening = work[(work["timestamp"] >= start) & (work["timestamp"] <= end)]
     if opening.empty:
         return None
     or_high = float(opening["high"].max())
     or_low = float(opening["low"].min())
     or_size = max(or_high - or_low, 1e-6)
 
-    after = df[df["timestamp"] > end]
+    after = work[work["timestamp"] > end]
     if after.empty:
         return None
 
@@ -83,16 +90,21 @@ def _detect_orb_trigger(df: pd.DataFrame, minutes: int) -> Optional[Dict[str, ob
 def _detect_failed_orb_trigger(df: pd.DataFrame, minutes: int) -> Optional[Dict[str, object]]:
     if df is None or df.empty:
         return None
-    date = pd.to_datetime(df["timestamp"].iloc[0]).date()
+    work = df.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"])
+    date = pd.to_datetime(work["timestamp"].iloc[-1]).date()
+    work = work[work["timestamp"].dt.date == date]
+    if work.empty:
+        return None
     start = pd.Timestamp.combine(date, pd.Timestamp("09:30").time())
     end = start + pd.Timedelta(minutes=minutes)
-    opening = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+    opening = work[(work["timestamp"] >= start) & (work["timestamp"] <= end)]
     if opening.empty:
         return None
 
     or_high = float(opening["high"].max())
     or_low = float(opening["low"].min())
-    after = df[df["timestamp"] > end]
+    after = work[work["timestamp"] > end]
     if after.empty:
         return None
 
@@ -168,6 +180,801 @@ def _detect_vwap_trigger(df: pd.DataFrame) -> Optional[Dict[str, object]]:
                 }
 
     return None
+
+
+def _rolling_atr_like(df: pd.DataFrame, length: int = 20) -> Optional[float]:
+    if df is None or df.empty or len(df) < length:
+        return None
+    try:
+        atr_series = (df["high"].astype(float) - df["low"].astype(float)).rolling(length).mean()
+        val = atr_series.iloc[-1]
+        if pd.isna(val):
+            return None
+        return float(val)
+    except Exception:
+        return None
+
+
+def _volatility_pack(df: pd.DataFrame, length: int = 20) -> Dict[str, object]:
+    if df is None or df.empty or len(df) < max(6, length):
+        return {
+            "std": None,
+            "atr_like": None,
+            "zscore": None,
+            "regime": "normal",
+            "regime_note": "Insufficient bars for robust volatility estimate.",
+        }
+
+    closes = df["close"].astype(float)
+    returns = closes.pct_change().dropna()
+    std = float(returns.rolling(length).std().iloc[-1]) if len(returns) >= length else float(returns.std())
+    mean = float(closes.rolling(length).mean().iloc[-1])
+    sd_px = float(closes.rolling(length).std().iloc[-1])
+    atr_like = _rolling_atr_like(df, length=length)
+
+    zscore = None
+    if sd_px > 0:
+        zscore = float((closes.iloc[-1] - mean) / sd_px)
+
+    hist = returns.rolling(length).std().dropna()
+    regime = "normal"
+    note = "Volatility is near recent baseline."
+    if not hist.empty:
+        p30 = float(hist.quantile(0.30))
+        p70 = float(hist.quantile(0.70))
+        if std > p70:
+            regime = "expanded"
+            note = "Volatility is expanded versus recent history."
+        elif std < p30:
+            regime = "compressed"
+            note = "Volatility is compressed versus recent history."
+
+    return {
+        "std": std,
+        "atr_like": atr_like,
+        "zscore": zscore,
+        "regime": regime,
+        "regime_note": note,
+        "good_bad_guide": "STDV lower than p30 is compressed, between p30-p70 is normal, above p70 is expanded.",
+        "regime_outcomes": {
+            "compressed": "Tighter ranges and breakout potential; confirm before chasing.",
+            "normal": "Balanced conditions; standard risk rules apply.",
+            "expanded": "Large swings and faster invalidation risk; reduce size and widen stops.",
+        },
+        "rest_of_day_assumption": (
+            "Expect larger intraday swings and faster rotations."
+            if regime == "expanded"
+            else "Expect tighter ranges until a breakout confirms."
+            if regime == "compressed"
+            else "Expect moderate two-way movement around key levels."
+        ),
+    }
+
+
+def _volume_detector(df: pd.DataFrame, length: int = 20) -> Dict[str, object]:
+    if df is None or df.empty or "volume" not in df.columns or len(df) < max(5, length):
+        return {
+            "rvol": None,
+            "participation_score": 50.0,
+            "spike": False,
+            "state": "normal",
+            "note": "Insufficient bars for relative volume profile.",
+        }
+
+    vol = df["volume"].astype(float)
+    avg = vol.rolling(length).mean().iloc[-1]
+    if pd.isna(avg) or avg <= 0:
+        return {
+            "rvol": None,
+            "participation_score": 50.0,
+            "spike": False,
+            "state": "normal",
+            "note": "Average volume unavailable for RVOL.",
+        }
+
+    rvol = float(vol.iloc[-1] / avg)
+    spike = bool(rvol >= 1.6)
+    state = "low" if rvol < 0.85 else "high" if rvol > 1.25 else "normal"
+    score = max(5.0, min(100.0, 40.0 + 30.0 * min(rvol, 2.0)))
+    note = "Volume participation is average."
+    if state == "low":
+        note = "Below-normal participation; fakeout risk is higher."
+    elif state == "high":
+        note = "Above-normal participation; move quality is stronger."
+
+    return {
+        "rvol": rvol,
+        "participation_score": round(score, 1),
+        "spike": spike,
+        "state": state,
+        "note": note,
+        "good_bad_guide": "RVOL < 0.85 is weak participation, 0.85-1.25 is normal, > 1.25 is strong.",
+        "rest_of_day_assumption": (
+            "Moves can follow through if structure aligns."
+            if state == "high"
+            else "Breakout failure risk is elevated without fresh participation."
+            if state == "low"
+            else "Need structure confirmation because participation is average."
+        ),
+    }
+
+
+def _momentum_prediction(
+    df: pd.DataFrame,
+    ny_direction: str,
+    volatility: Dict[str, object],
+    volume: Dict[str, object],
+) -> Dict[str, object]:
+    if df is None or df.empty or len(df) < 25:
+        return {
+            "prob_up": 50.0,
+            "prob_down": 50.0,
+            "predicted": "Neutral",
+            "confidence": 0.0,
+            "note": "Insufficient bars for momentum model.",
+        }
+
+    closes = df["close"].astype(float)
+    ret5 = float((closes.iloc[-1] / closes.iloc[-6]) - 1.0) if len(closes) >= 6 else 0.0
+    ret15 = float((closes.iloc[-1] / closes.iloc[-16]) - 1.0) if len(closes) >= 16 else 0.0
+    y = closes.tail(20).values
+    x = np.arange(len(y))
+    slope = float(np.polyfit(x, y, 1)[0]) if len(y) >= 5 else 0.0
+
+    slope_norm = slope / max(abs(closes.iloc[-1]) * 0.0005, 1e-6)
+    score = 0.0
+    score += max(-2.0, min(2.0, ret5 * 300.0))
+    score += max(-2.0, min(2.0, ret15 * 150.0))
+    score += max(-2.0, min(2.0, slope_norm))
+
+    if str(volume.get("state", "normal")) == "high":
+        score += 0.5
+    elif str(volume.get("state", "normal")) == "low":
+        score -= 0.5
+
+    if str(volatility.get("regime", "normal")) == "expanded":
+        score *= 0.85
+
+    prob_up = 50.0 + max(-40.0, min(40.0, score * 10.0))
+    prob_up = max(1.0, min(99.0, prob_up))
+    prob_down = 100.0 - prob_up
+
+    predicted = "Bullish" if prob_up > 55 else "Bearish" if prob_up < 45 else "Neutral"
+    confidence = abs(prob_up - 50.0) * 2.0
+    note = "Momentum is balanced."
+    if predicted == "Bullish":
+        note = "Short-horizon momentum leans bullish."
+    elif predicted == "Bearish":
+        note = "Short-horizon momentum leans bearish."
+
+    if ny_direction in {"Bullish", "Bearish"} and predicted == ny_direction:
+        note += " Momentum agrees with session bias."
+    elif ny_direction in {"Bullish", "Bearish"} and predicted in {"Bullish", "Bearish"}:
+        note += " Momentum conflicts with session bias."
+
+    return {
+        "prob_up": round(prob_up, 1),
+        "prob_down": round(prob_down, 1),
+        "predicted": predicted,
+        "confidence": round(confidence, 1),
+        "note": note,
+        "good_bad_guide": "Confidence < 15 is weak, 15-35 is moderate, > 35 is strong momentum signal.",
+        "rest_of_day_assumption": (
+            "Continuation odds are stronger while trigger structure remains valid."
+            if confidence >= 35.0
+            else "Momentum edge is modest; rely more on confluence and risk gates."
+        ),
+    }
+
+
+def _vwap_mean_reversion_vs_expansion(
+    df: pd.DataFrame,
+    daily_vwap: Optional[float],
+    windows: Dict[str, Dict[str, dt.datetime]],
+    volume: Dict[str, object],
+    momentum: Dict[str, object],
+    volatility: Dict[str, object],
+) -> Dict[str, object]:
+    if df is None or df.empty or daily_vwap is None:
+        return {
+            "session": "NY",
+            "price_vs_vwap": "n/a",
+            "mean_reversion_prob": 50.0,
+            "expansion_prob": 50.0,
+            "directional_expansion": "Neutral",
+            "note": "VWAP unavailable for probability model.",
+        }
+
+    us_start = windows.get("US", {}).get("start")
+    us_end = windows.get("US", {}).get("end")
+    work = df.copy()
+    if us_start is not None:
+        work = work[work["timestamp"] >= us_start]
+    if us_end is not None:
+        work = work[work["timestamp"] <= us_end]
+    if work.empty:
+        work = df.tail(60)
+
+    closes = work["close"].astype(float)
+    above_ratio = float((closes > daily_vwap).mean()) if len(closes) else 0.5
+    last = float(closes.iloc[-1])
+
+    stretch = float(volatility.get("zscore", 0.0) or 0.0)
+    rvol = float(volume.get("rvol", 1.0) or 1.0)
+    mom_up = float(momentum.get("prob_up", 50.0) or 50.0)
+
+    expansion = 50.0
+    if last >= daily_vwap:
+        expansion += (above_ratio - 0.5) * 40.0
+        expansion += (mom_up - 50.0) * 0.35
+    else:
+        expansion += ((1.0 - above_ratio) - 0.5) * 40.0
+        expansion += ((100.0 - mom_up) - 50.0) * 0.35
+
+    expansion += (min(max(rvol, 0.5), 2.0) - 1.0) * 12.0
+    expansion -= max(0.0, abs(stretch) - 1.8) * 10.0
+
+    expansion = max(5.0, min(95.0, expansion))
+    mean_rev = 100.0 - expansion
+    vs = "Above" if last > daily_vwap else "Below" if last < daily_vwap else "At"
+    directional = "Bullish" if last >= daily_vwap and expansion >= mean_rev else "Bearish" if last < daily_vwap and expansion >= mean_rev else "Neutral"
+
+    note = (
+        "NY VWAP model favors expansion from current side."
+        if expansion >= mean_rev
+        else "NY VWAP model favors mean reversion back to VWAP."
+    )
+
+    return {
+        "session": "NY",
+        "price_vs_vwap": vs,
+        "mean_reversion_prob": round(mean_rev, 1),
+        "expansion_prob": round(expansion, 1),
+        "directional_expansion": directional,
+        "note": note,
+    }
+
+
+def _vwap_strength_after_dip(df: pd.DataFrame, daily_vwap: Optional[float]) -> Dict[str, object]:
+    base = {
+        "score": 0.0,
+        "label": "Not Active",
+        "reclaim_time": "n/a",
+        "entry_timing": "Wait for reclaim sequence.",
+        "note": "No active dip-and-reclaim pattern.",
+        "rest_of_day_assumption": "No actionable VWAP reclaim expectation yet.",
+    }
+    if df is None or df.empty or daily_vwap is None or len(df) < 10:
+        return base
+
+    work = df.copy().sort_values("timestamp").reset_index(drop=True)
+    rel = work["close"].astype(float) - float(daily_vwap)
+
+    reclaim_idx = None
+    for i in range(2, len(rel)):
+        if rel.iloc[i - 1] <= 0 and rel.iloc[i] > 0:
+            reclaim_idx = i
+    if reclaim_idx is None:
+        return base
+
+    segment = work.iloc[max(0, reclaim_idx - 6) : min(len(work), reclaim_idx + 10)]
+    closes = segment["close"].astype(float).values
+    above = np.mean(closes > daily_vwap) if len(closes) else 0.0
+    reclaim_bar = work.iloc[reclaim_idx]
+    reclaim_time = _fmt_ts(pd.to_datetime(reclaim_bar["timestamp"])) or "n/a"
+
+    forward = work.iloc[reclaim_idx : min(len(work), reclaim_idx + 8)]
+    advance = max(0.0, float(forward["high"].max()) - float(reclaim_bar["close"])) if not forward.empty else 0.0
+    pullback = max(0.0, float(reclaim_bar["close"]) - float(forward["low"].min())) if not forward.empty else 0.0
+
+    score = 35.0 + above * 35.0 + min(20.0, advance * 4.0) - min(15.0, pullback * 4.0)
+    score = max(0.0, min(100.0, score))
+    label = "Weak" if score < 45 else "Moderate" if score < 70 else "Strong"
+    timing = "First reclaim hold is acceptable." if score >= 70 else "Prefer second retest confirmation." if score >= 45 else "Wait for better reclaim quality."
+    note = (
+        "Reclaim held with follow-through above VWAP."
+        if score >= 70
+        else "Reclaim is present but needs cleaner confirmation."
+        if score >= 45
+        else "Reclaim quality is weak and vulnerable to failure."
+    )
+
+    return {
+        "score": round(score, 1),
+        "score_out_of": f"{round(score, 1)}/100",
+        "label": label,
+        "reclaim_time": reclaim_time,
+        "entry_timing": timing,
+        "note": note,
+        "good_bad_guide": "<45 weak, 45-69 moderate, >=70 strong reclaim quality.",
+        "rest_of_day_assumption": (
+            "Expect continuation attempts above VWAP while reclaim structure remains intact."
+            if score >= 70
+            else "Expect choppy retests around VWAP until cleaner confirmation appears."
+            if score >= 45
+            else "Expect higher risk of reclaim failure and rotation back toward VWAP/under it."
+        ),
+    }
+
+
+def _build_expectation_summaries(
+    vwap_dip: Dict[str, object],
+    performance: Dict[str, object],
+    volatility: Dict[str, object],
+    volume: Dict[str, object],
+    momentum: Dict[str, object],
+) -> Dict[str, str]:
+    return {
+        "vwap_dip": str(vwap_dip.get("rest_of_day_assumption", "n/a")),
+        "performance": str(performance.get("rest_of_day_assumption", "n/a")),
+        "volatility": str(volatility.get("rest_of_day_assumption", "n/a")),
+        "volume": str(volume.get("rest_of_day_assumption", "n/a")),
+        "momentum": str(momentum.get("rest_of_day_assumption", "n/a")),
+    }
+
+
+def _risk_engine(
+    last_price: float,
+    direction: str,
+    reference_rows: List[Dict[str, object]],
+    target_ladder: List[Dict[str, object]],
+    volatility: Dict[str, object],
+    volume: Dict[str, object],
+    momentum: Dict[str, object],
+    vwap_prob: Dict[str, object],
+) -> Dict[str, object]:
+    atr_like = float(volatility.get("atr_like", 1.0) or 1.0)
+    side = "Long" if direction == "Bullish" else "Short" if direction == "Bearish" else "Wait"
+    if side == "Wait":
+        return {
+            "side": "Wait",
+            "entry": round(last_price, 2),
+            "stop": None,
+            "target": None,
+            "risk_points": None,
+            "reward_points": None,
+            "rr": None,
+            "size_contracts_10k": 0,
+            "quality_score": 35.0,
+            "status": "Caution",
+            "notes": "No directional bias; hold until direction and trigger align.",
+        }
+
+    ref = reference_rows[0] if reference_rows else None
+    if ref:
+        zone_low = float(ref.get("Price Low", last_price))
+        zone_high = float(ref.get("Price High", last_price))
+    else:
+        zone_low = last_price - atr_like
+        zone_high = last_price + atr_like
+
+    stop = (zone_low - 0.25 * atr_like) if side == "Long" else (zone_high + 0.25 * atr_like)
+
+    target = None
+    for t in target_ladder:
+        px = float(t.get("Price", last_price))
+        if side == "Long" and px > last_price:
+            target = px
+            break
+        if side == "Short" and px < last_price:
+            target = px
+            break
+    if target is None:
+        target = last_price + (1.8 * atr_like if side == "Long" else -1.8 * atr_like)
+
+    risk_points = max(abs(last_price - stop), 0.25)
+    reward_points = max(abs(target - last_price), 0.0)
+    rr = reward_points / risk_points if risk_points > 0 else 0.0
+
+    # NQ-like point value for sizing guidance.
+    point_value = 20.0
+    risk_budget = 50.0
+    contracts = int(max(0.0, math.floor(risk_budget / max(risk_points * point_value, 1e-6))))
+
+    quality = 45.0
+    quality += max(-10.0, min(15.0, (rr - 1.2) * 18.0))
+    quality += (float(volume.get("participation_score", 50.0)) - 50.0) * 0.20
+    quality += (float(momentum.get("confidence", 0.0)) - 20.0) * 0.10
+    if direction == "Bullish":
+        quality += (float(momentum.get("prob_up", 50.0)) - 50.0) * 0.15
+    else:
+        quality += (float(momentum.get("prob_down", 50.0)) - 50.0) * 0.15
+
+    exp_prob = float(vwap_prob.get("expansion_prob", 50.0))
+    mean_prob = float(vwap_prob.get("mean_reversion_prob", 50.0))
+    quality += (exp_prob - mean_prob) * 0.10
+
+    quality = max(0.0, min(100.0, quality))
+    status = "High" if quality >= 70 else "Moderate" if quality >= 55 else "Caution"
+    notes = (
+        "Risk model supports execution with current parameters."
+        if quality >= 70
+        else "Execution is possible but requires strict trigger confirmation."
+        if quality >= 55
+        else "Risk quality is weak; wait for better alignment."
+    )
+
+    return {
+        "side": side,
+        "entry": round(last_price, 2),
+        "stop": round(stop, 2),
+        "target": round(target, 2),
+        "risk_points": round(risk_points, 2),
+        "reward_points": round(reward_points, 2),
+        "rr": round(rr, 2),
+        "size_contracts_10k": contracts,
+        "quality_score": round(quality, 1),
+        "status": status,
+        "notes": notes,
+    }
+
+
+def _performance_metrics(df: pd.DataFrame) -> Dict[str, object]:
+    if df is None or df.empty or len(df) < 12:
+        return {
+            "max_drawdown_pct": 0.0,
+            "current_drawdown_pct": 0.0,
+            "drawdown_duration_bars": 0,
+            "expected_value_bps": 0.0,
+            "expected_value_raw": 0.0,
+            "raw_sharpe": 0.0,
+            "annualized_sharpe": 0.0,
+            "notes": "Insufficient bars for drawdown/EV/Sharpe metrics.",
+        }
+
+    closes = df["close"].astype(float)
+    rets = closes.pct_change().dropna()
+    if rets.empty:
+        return {
+            "max_drawdown_pct": 0.0,
+            "current_drawdown_pct": 0.0,
+            "drawdown_duration_bars": 0,
+            "expected_value_bps": 0.0,
+            "expected_value_raw": 0.0,
+            "raw_sharpe": 0.0,
+            "annualized_sharpe": 0.0,
+            "notes": "Returns unavailable for performance metrics.",
+        }
+
+    equity = (1.0 + rets).cumprod()
+    peaks = equity.cummax()
+    dd = equity / peaks - 1.0
+    max_dd = float(dd.min()) * 100.0
+    curr_dd = float(dd.iloc[-1]) * 100.0
+
+    dd_duration = 0
+    cur = 0
+    for val in dd.values:
+        if val < 0:
+            cur += 1
+            dd_duration = max(dd_duration, cur)
+        else:
+            cur = 0
+
+    mean_r = float(rets.mean())
+    std_r = float(rets.std())
+    raw_sharpe = (mean_r / std_r) if std_r > 1e-12 else 0.0
+
+    # Approximate annualization based on inferred bars/day and 252 trading days.
+    periods = max(len(rets), 1)
+    ann_factor = math.sqrt(min(252.0 * max(periods / 1.0, 1.0), 252.0 * 390.0))
+    ann_sharpe = raw_sharpe * ann_factor
+
+    wins = rets[rets > 0]
+    losses = rets[rets <= 0]
+    p_win = float(len(wins) / len(rets))
+    avg_win = float(wins.mean()) if not wins.empty else 0.0
+    avg_loss = abs(float(losses.mean())) if not losses.empty else 0.0
+    ev_raw = p_win * avg_win - (1.0 - p_win) * avg_loss
+
+    notes = "Metrics are intraday-return based and should be validated against trade-level backtests."
+    return {
+        "max_drawdown_pct": round(max_dd, 2),
+        "current_drawdown_pct": round(curr_dd, 2),
+        "drawdown_duration_bars": int(dd_duration),
+        "expected_value_bps": round(ev_raw * 10000.0, 2),
+        "expected_value_raw": round(ev_raw, 6),
+        "raw_sharpe": round(raw_sharpe, 4),
+        "annualized_sharpe": round(ann_sharpe, 3),
+        "notes": notes,
+        "good_bad_guide": {
+            "max_drawdown_pct": "Closer to 0 is better. Deep negatives indicate fragile behavior.",
+            "expected_value_bps": "Positive is good edge, near zero is weak edge, negative is bad edge.",
+            "raw_sharpe": "~0.5 modest, ~1.0 good, >1.5 strong, below 0 weak.",
+        },
+        "rest_of_day_assumption": (
+            "Recent profile is unstable; prioritize defense and selective entries."
+            if max_dd <= -3.0 or ev_raw <= 0
+            else "Recent profile is constructive; maintain disciplined execution."
+        ),
+    }
+
+
+def _entry_confidence_tier(score: float) -> str:
+    if score >= 75.0:
+        return "High"
+    if score >= 55.0:
+        return "Moderate"
+    return "Low"
+
+
+def _trade_decision_bucket(trade_today: str) -> str:
+    v = str(trade_today or "").strip().lower()
+    if v in {"yes", "tradeable whipsaw"}:
+        return "Yes"
+    if v in {"no", "untradeable whipsaw"}:
+        return "No"
+    return "Wait"
+
+
+def _attach_entry_confidence(
+    entry_styles: List[Dict[str, object]],
+    risk_engine: Dict[str, object],
+    momentum: Dict[str, object],
+    volume: Dict[str, object],
+    vwap_prob: Dict[str, object],
+    ny_direction: str,
+    trade_today: str,
+    primary_trigger: Optional[Dict[str, object]],
+    whipsaw_risk: bool,
+) -> List[Dict[str, object]]:
+    out: List[Dict[str, object]] = []
+    trade_bucket = _trade_decision_bucket(trade_today)
+    for row in entry_styles:
+        score = 40.0
+        reasons: List[str] = []
+        action = str(row.get("Action", "Wait"))
+        reaction_score = float(row.get("Reaction Score", 0.0) or 0.0)
+        status = str(row.get("Status", "Fresh"))
+
+        score += (float(risk_engine.get("quality_score", 50.0)) - 50.0) * 0.35
+        reasons.append(f"Risk quality {float(risk_engine.get('quality_score', 50.0)):.1f}/100")
+
+        if reaction_score > 0:
+            score += (reaction_score - 50.0) * 0.30
+            reasons.append(f"Zone reaction score {reaction_score:.1f}")
+
+        mom_conf = float(momentum.get("confidence", 0.0) or 0.0)
+        mom_pred = str(momentum.get("predicted", "Neutral"))
+        if action == "Long":
+            score += (float(momentum.get("prob_up", 50.0)) - 50.0) * 0.25
+            if mom_pred == "Bullish":
+                reasons.append("Momentum agrees with long direction")
+        elif action == "Short":
+            score += (float(momentum.get("prob_down", 50.0)) - 50.0) * 0.25
+            if mom_pred == "Bearish":
+                reasons.append("Momentum agrees with short direction")
+        score += (mom_conf - 20.0) * 0.08
+
+        score += (float(volume.get("participation_score", 50.0)) - 50.0) * 0.20
+        reasons.append(f"Volume participation {float(volume.get('participation_score', 50.0)):.1f}/100")
+
+        exp = float(vwap_prob.get("expansion_prob", 50.0) or 50.0)
+        rev = float(vwap_prob.get("mean_reversion_prob", 50.0) or 50.0)
+        if action == "Long" and ny_direction == "Bullish":
+            score += (exp - rev) * 0.10
+        elif action == "Short" and ny_direction == "Bearish":
+            score += (exp - rev) * 0.10
+        else:
+            score -= 4.0
+
+        if status == "Invalidated":
+            score -= 35.0
+            reasons.append("Confluence invalidated")
+        elif status == "Retested":
+            score -= 6.0
+            reasons.append("Confluence already retested")
+
+        if whipsaw_risk:
+            score -= 8.0
+            reasons.append("Whipsaw risk penalty")
+
+        if trade_bucket == "No":
+            score -= 25.0
+            reasons.append("Trade decision is No")
+        elif trade_bucket == "Wait":
+            score -= 10.0
+            reasons.append("Trade decision is Wait")
+
+        trigger_aligned = False
+        if primary_trigger is not None:
+            trigger_dir = str(primary_trigger.get("direction", "Neutral"))
+            if (action == "Long" and trigger_dir == "Bullish") or (action == "Short" and trigger_dir == "Bearish"):
+                trigger_aligned = True
+                score += 10.0
+                reasons.append(f"Primary trigger alignment: {primary_trigger.get('name', 'n/a')}")
+            elif trigger_dir in {"Bullish", "Bearish"}:
+                score -= 6.0
+                reasons.append("Primary trigger conflicts with entry side")
+
+        # Option 2 tuning: reward strong trigger + reaction confluence more aggressively.
+        if trigger_aligned:
+            if reaction_score >= 70.0:
+                score += 14.0
+                reasons.append("Strong trigger+reaction alignment boost")
+            elif reaction_score >= 55.0:
+                score += 10.0
+                reasons.append("Moderate trigger+reaction alignment boost")
+            elif reaction_score >= 40.0:
+                score += 6.0
+                reasons.append("Early trigger+reaction alignment boost")
+
+        score = max(0.0, min(100.0, score))
+        tier = _entry_confidence_tier(score)
+        row_out = dict(row)
+        row_out["Entry Confidence"] = round(score, 1)
+        row_out["Confidence Tier"] = tier
+        row_out["Confidence Reasoning"] = "; ".join(reasons[:6])
+        out.append(row_out)
+    return out
+
+
+def _to_ts(value: object) -> Optional[pd.Timestamp]:
+    if value in (None, "", "n/a"):
+        return None
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return pd.Timestamp(ts)
+
+
+def _evaluate_entry_executions(
+    df: pd.DataFrame,
+    entry_styles: List[Dict[str, object]],
+    risk_engine: Dict[str, object],
+) -> List[Dict[str, object]]:
+    if df is None or df.empty:
+        return []
+
+    work = df.copy().sort_values("timestamp").reset_index(drop=True)
+    work["timestamp"] = pd.to_datetime(work["timestamp"])
+    atr_like = _rolling_atr_like(work, length=20) or 2.0
+    results: List[Dict[str, object]] = []
+
+    for row in entry_styles:
+        confluence = str(row.get("Confluence", "n/a"))
+        action = str(row.get("Action", "Wait"))
+        suggested = str(row.get("Suggested Entry", "First Tap"))
+
+        if action not in {"Long", "Short"}:
+            results.append(
+                {
+                    "Confluence": confluence,
+                    "Action": action,
+                    "Suggested Entry": suggested,
+                    "Entry Price": "n/a",
+                    "Risk Pts(Ticks)": "n/a",
+                    "Risk $ (1 contract)": "n/a",
+                    "Executed": "No",
+                    "Execution Time": "n/a",
+                    "Outcome": "Skipped",
+                    "Exit Time": "n/a",
+                    "Exit Price": "n/a",
+                    "Why": "No directional action for this entry suggestion.",
+                }
+            )
+            continue
+
+        is_long = action == "Long"
+        use_mid = "midline" in suggested.lower() or "split" in suggested.lower()
+        entry_price = float(row.get("Midline Price", 0.0)) if use_mid else float(row.get("First Tap Price", 0.0))
+
+        # Build stop/target from suggestion first, then fall back to risk engine.
+        if is_long:
+            stop = min(entry_price - atr_like * 0.6, float(row.get("First Tap Price", entry_price)) - atr_like * 0.25)
+            tgt = float(row.get("Preferred Target Price") or risk_engine.get("target") or (entry_price + atr_like * 1.5))
+        else:
+            stop = max(entry_price + atr_like * 0.6, float(row.get("First Tap Price", entry_price)) + atr_like * 0.25)
+            tgt = float(row.get("Preferred Target Price") or risk_engine.get("target") or (entry_price - atr_like * 1.5))
+
+        exec_time = _to_ts(row.get("Midline Time")) if use_mid else _to_ts(row.get("Tap Time"))
+        if exec_time is None:
+            # Fallback: if style already marked as hit, use formed time as proxy.
+            hit = str(row.get("Midline Hit" if use_mid else "Tap Hit", "No")) == "Yes"
+            if hit:
+                exec_time = _to_ts(row.get("Formed Time"))
+
+        if exec_time is None:
+            pending_risk_points = max(0.25, abs(entry_price - stop))
+            pending_ticks = int(round(pending_risk_points / 0.25))
+            pending_risk_dollars = pending_risk_points * 20.0
+            results.append(
+                {
+                    "Confluence": confluence,
+                    "Action": action,
+                    "Suggested Entry": suggested,
+                    "Entry Price": round(entry_price, 2),
+                    "Risk Pts(Ticks)": f"{pending_risk_points:.2f} ({pending_ticks})",
+                    "Risk $ (1 contract)": round(pending_risk_dollars, 2),
+                    "Executed": "No",
+                    "Execution Time": "n/a",
+                    "Outcome": "Pending",
+                    "Exit Time": "n/a",
+                    "Exit Price": "n/a",
+                    "Why": "Entry level has not been touched yet.",
+                }
+            )
+            continue
+
+        future = work[work["timestamp"] >= exec_time]
+        if future.empty:
+            open_risk_points = max(0.25, abs(entry_price - stop))
+            open_ticks = int(round(open_risk_points / 0.25))
+            open_risk_dollars = open_risk_points * 20.0
+            results.append(
+                {
+                    "Confluence": confluence,
+                    "Action": action,
+                    "Suggested Entry": suggested,
+                    "Entry Price": round(entry_price, 2),
+                    "Risk Pts(Ticks)": f"{open_risk_points:.2f} ({open_ticks})",
+                    "Risk $ (1 contract)": round(open_risk_dollars, 2),
+                    "Executed": "Yes",
+                    "Execution Time": _fmt_ts(exec_time),
+                    "Outcome": "Open",
+                    "Exit Time": "n/a",
+                    "Exit Price": "n/a",
+                    "Why": "No bars yet after execution timestamp.",
+                }
+            )
+            continue
+
+        outcome = "Open"
+        exit_time = "n/a"
+        exit_price: object = "n/a"
+        why = "Target/stop not reached yet."
+        for _, bar in future.iterrows():
+            high = float(bar["high"])
+            low = float(bar["low"])
+            bar_ts = pd.to_datetime(bar["timestamp"])
+
+            if is_long:
+                hit_stop = low <= stop
+                hit_target = high >= tgt
+            else:
+                hit_stop = high >= stop
+                hit_target = low <= tgt
+
+            if hit_stop and hit_target:
+                # Conservative tie-breaker: assume stop first.
+                outcome = "Failed"
+                exit_time = _fmt_ts(bar_ts) or "n/a"
+                exit_price = round(stop, 2)
+                why = "Both stop and target touched in same bar; conservative stop-first assumption applied."
+                break
+            if hit_stop:
+                outcome = "Failed"
+                exit_time = _fmt_ts(bar_ts) or "n/a"
+                exit_price = round(stop, 2)
+                why = "Stop level was touched after execution."
+                break
+            if hit_target:
+                outcome = "Successful"
+                exit_time = _fmt_ts(bar_ts) or "n/a"
+                exit_price = round(tgt, 2)
+                why = "Target level was reached after execution."
+                break
+
+        final_risk_points = max(0.25, abs(entry_price - stop))
+        final_ticks = int(round(final_risk_points / 0.25))
+        results.append(
+            {
+                "Confluence": confluence,
+                "Action": action,
+                "Suggested Entry": suggested,
+                "Entry Price": round(entry_price, 2),
+            "Risk Pts(Ticks)": f"{final_risk_points:.2f} ({final_ticks})",
+            "Risk $ (1 contract)": round(final_risk_points * 20.0, 2),
+                "Executed": "Yes",
+                "Execution Time": _fmt_ts(exec_time) or "n/a",
+                "Outcome": outcome,
+                "Exit Time": exit_time,
+                "Exit Price": exit_price,
+                "Why": why,
+            }
+        )
+
+    return results
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
@@ -807,11 +1614,28 @@ def _enrich_trigger(trigger: Dict[str, object]) -> Dict[str, object]:
 def _pick_primary_trigger(triggers: List[Dict[str, object]], direction: str) -> Optional[Dict[str, object]]:
     if not triggers:
         return None
+
+    def _priority(name: str) -> int:
+        if "ORB 30m" in name:
+            return 1
+        if "ORB 60m" in name:
+            return 2
+        if "Failed ORB 30m" in name:
+            return 3
+        if "Failed ORB 60m" in name:
+            return 4
+        if "VWAP" in name:
+            return 5
+        return 9
+
+    candidates = triggers
     if direction in {"Bullish", "Bearish"}:
         aligned = [t for t in triggers if t.get("direction") == direction]
         if aligned:
-            return aligned[0]
-    return triggers[0]
+            candidates = aligned
+
+    candidates = sorted(candidates, key=lambda t: (_priority(str(t.get("name", ""))), str(t.get("time", ""))))
+    return candidates[0] if candidates else None
 
 
 def _select_reference_confluences(
@@ -1045,6 +1869,7 @@ def _suggest_confluence_entry_styles(
     for row in reference_rows:
         name = str(row.get("Confluence", "n/a"))
         name_l = name.lower()
+        side = str(row.get("Side", "")).capitalize() or "Neutral"
         low = float(row.get("Price Low", 0.0))
         high = float(row.get("Price High", 0.0))
         mid = (low + high) / 2.0
@@ -1114,9 +1939,28 @@ def _suggest_confluence_entry_styles(
         else:
             exit_plan = "Use nearest qualified ladder target; exit early on invalidation."
 
+        action = "Long" if side == "Bullish" else "Short" if side == "Bearish" else "Wait"
+        if invalidated:
+            action = "Wait"
+
+        if reaction_score >= 70.0:
+            expected_retests = "0-1 likely before continuation"
+            entry_timing = "First touch/reclaim is acceptable if reaction confirms."
+        elif reaction_score >= 45.0:
+            expected_retests = "1-2 likely before cleaner continuation"
+            entry_timing = "Prefer second retest confirmation before full size."
+        else:
+            expected_retests = "2+ likely or chop risk elevated"
+            entry_timing = "Wait for stronger rejection/engulfing evidence."
+
+        if status in {"Retested", "Tested"} and reaction_score < 70.0:
+            entry_timing = "Zone already tested; wait for fresh confirmation candle."
+
         suggestions.append(
             {
                 "Confluence": name,
+                "Side": side,
+                "Action": action,
                 "Kind": zone_kind,
                 "Status": status,
                 "Formed Time": formed_time,
@@ -1136,6 +1980,8 @@ def _suggest_confluence_entry_styles(
                 "Preferred Target Price": round(preferred_tgt, 2) if preferred_tgt is not None else None,
                 "Minimum Target Price": round(min_tgt, 2) if min_tgt is not None else None,
                 "Maximum Target Price": round(max_tgt, 2) if max_tgt is not None else None,
+                "Expected Retests": expected_retests,
+                "Entry Timing": entry_timing,
                 "Entry Style Reason": reason,
                 "Reason": reason,
             }
@@ -1155,8 +2001,9 @@ def _estimate_daily_entry_capacity(
 ) -> Dict[str, object]:
     us_start = windows.get("US", {}).get("start")
     us_end = windows.get("US", {}).get("end")
+    trade_bucket = _trade_decision_bucket(trade_today)
 
-    if trade_today == "No":
+    if trade_bucket == "No":
         return {
             "expected_min": 0,
             "expected_max": 0,
@@ -1181,7 +2028,7 @@ def _estimate_daily_entry_capacity(
     if top_liq_count >= 2 and mode != "Whipsaw Risk":
         max_e = min(max_e + 1, 4)
 
-    if primary_trigger is not None and trade_today in {"Yes", "Wait"}:
+    if primary_trigger is not None and trade_bucket in {"Yes", "Wait"}:
         min_e = max(min_e, 1)
 
     if us_start and now < us_start:
@@ -1251,7 +2098,18 @@ def _entry_blueprints(
     if mode == "Whipsaw Risk":
         return [
             {
+                "Setup": "Wait For OR Confirmation",
+                "Action": "Long/Short (post-OR only)",
+                "IfThen": "If whipsaw is active before OR forms, wait until OR is defined and only trade confirmed OR break/retest direction.",
+                "Trigger": "ORB 30m/60m or Failed ORB aligned with daily bias.",
+                "Confluence Entry": "Confirmation Retest",
+                "Entry Reason": "Prevents missing valid post-OR trades while avoiding early chop.",
+                "Execution TF": "1m-5m",
+                "Session": "09:30-11:30 ET",
+            },
+            {
                 "Setup": "Risk-Off / Two-Sided",
+                "Action": "Wait",
                 "IfThen": f"If price keeps crossing around {daily_vwap_label} and cannot hold either side of OR, then avoid directional entries.",
                 "Trigger": "Use only exceptional reclaim/reject + structure alignment at high-liquidity confluence.",
                 "Confluence Entry": primary_style,
@@ -1267,6 +2125,7 @@ def _entry_blueprints(
     base = [
         {
             "Setup": "VWAP Acceptance",
+            "Action": "Long" if direction == "Bullish" else "Short" if direction == "Bearish" else "Wait",
             "IfThen": f"If price retests {daily_vwap_label} and holds the {direction.lower()} side near {primary_confluence}, then look for {direction_word} continuation.",
             "Trigger": f"VWAP reclaim/reject hold + 1m structure confirmation while staying {opposite} invalidation side.",
             "Confluence Entry": primary_style,
@@ -1276,6 +2135,7 @@ def _entry_blueprints(
         },
         {
             "Setup": "OR Retest",
+            "Action": "Long" if direction == "Bullish" else "Short" if direction == "Bearish" else "Wait",
             "IfThen": f"If OR break aligns {direction.lower()} and retest holds into {secondary_confluence}, then execute continuation.",
             "Trigger": "ORB or Failed ORB confirmation.",
             "Confluence Entry": primary_style,
@@ -1290,6 +2150,7 @@ def _entry_blueprints(
             0,
             {
                 "Setup": "AMD Reversal",
+                "Action": "Long" if direction == "Bullish" else "Short" if direction == "Bearish" else "Wait",
                 "IfThen": f"If London sweep is rejected and US reclaims through {primary_confluence}, then look for {direction_word} toward opposite liquidity.",
                 "Trigger": "Sweep rejection + reclaim + micro BOS/CHOCH.",
                 "Confluence Entry": primary_style,
@@ -1304,6 +2165,7 @@ def _entry_blueprints(
             0,
             {
                 "Setup": "NY Continuation Pullback",
+                "Action": "Long" if direction == "Bullish" else "Short" if direction == "Bearish" else "Wait",
                 "IfThen": f"If price pulls back to {primary_confluence} and holds with {daily_vwap_label} support/resistance, then execute {direction_word}.",
                 "Trigger": "Retest hold + momentum re-expansion.",
                 "Confluence Entry": primary_style,
@@ -1446,9 +2308,37 @@ def build_strategy_playbook(
         if detected:
             triggers.append(detected)
 
+    confirmation_triggers: List[Dict[str, object]] = []
+    if getattr(patterns, "asia_range_sweep", False):
+        confirmation_triggers.append(
+            {
+                "name": "Asia Range Sweep Bias",
+                "direction": getattr(patterns, "asia_range_sweep_bias", "Neutral"),
+                "time": _fmt_ts(pd.to_datetime(df["timestamp"].iloc[0])),
+                "price": float(df["open"].iloc[0]),
+                "timeframe": "Session",
+                "details": "Overnight sweep pattern supports directional bias.",
+                "category": "Overnight Confirmation",
+            }
+        )
+    if getattr(patterns, "london_continuation", False):
+        confirmation_triggers.append(
+            {
+                "name": "London Continuation Bias",
+                "direction": getattr(patterns, "london_continuation_bias", "Neutral"),
+                "time": _fmt_ts(pd.to_datetime(df["timestamp"].iloc[0])),
+                "price": float(df["open"].iloc[0]),
+                "timeframe": "Session",
+                "details": "London continuation structure supports NY bias.",
+                "category": "Overnight Confirmation",
+            }
+        )
+
     triggers = sorted(triggers, key=lambda x: x.get("time") or "")
     triggers = [_enrich_trigger(t) for t in triggers]
     primary_trigger = _pick_primary_trigger(triggers, ny_direction)
+    active_trigger_names = [str(t.get("name", "")) for t in triggers]
+    orb_trigger_seen = any("ORB" in name for name in active_trigger_names)
 
     supporting_factors: List[str] = []
     blocking_factors: List[str] = []
@@ -1459,6 +2349,10 @@ def build_strategy_playbook(
         supporting_factors.append(f"Directional bias: {ny_direction}")
     if primary_trigger:
         supporting_factors.append(f"Trigger fired: {primary_trigger['name']}")
+    if confirmation_triggers:
+        supporting_factors.append(
+            "Bias confirmations: " + ", ".join([str(t.get("name", "n/a")) for t in confirmation_triggers[:2]])
+        )
 
     if whipsaw_risk:
         blocking_factors.append(f"Whipsaw ratio elevated ({whipsaw_ratio:.2f})")
@@ -1468,35 +2362,66 @@ def build_strategy_playbook(
     us_start = windows.get("US", {}).get("start")
     us_confirm = us_start + dt.timedelta(minutes=60) if us_start else None
     us_end = windows.get("US", {}).get("end")
+    or30_ready = us_start is not None and now >= (us_start + dt.timedelta(minutes=30))
+    or60_ready = us_start is not None and now >= (us_start + dt.timedelta(minutes=60))
 
     trade_today = "Wait"
     primary_reason = "Waiting for session confirmation."
     confidence = 0.45
+    wait_for_confirmations: List[str] = []
 
-    if ny_mode == "Whipsaw Risk":
-        trade_today = "No"
-        primary_reason = "Whipsaw risk is elevated; avoid directional setup unless exceptional confirmation appears."
-        confidence = 0.75
-    elif us_start and now < us_start:
+    if us_start and now < us_start:
         trade_today = "Wait"
         primary_reason = "US session not started yet."
         confidence = 0.55
+        wait_for_confirmations = [
+            "Wait for US open and OR 30m formation.",
+            "Require first directional trigger aligned with daily bias.",
+        ]
+    elif ny_mode == "Whipsaw Risk" and not or30_ready:
+        trade_today = "Wait"
+        primary_reason = "Whipsaw risk detected pre-OR. Wait for OR formation before committing to an entry."
+        confidence = 0.62
+        wait_for_confirmations = [
+            "Wait for OR 30m/60m to complete (10:00/10:30 ET).",
+            "Require ORB/Failed ORB trigger aligned with daily bias.",
+            "Require reaction confirmation at top-liquidity confluence.",
+        ]
     elif primary_trigger is not None:
         trade_today = "Yes"
         primary_reason = f"Qualified trigger detected: {primary_trigger['name']}."
-        confidence = 0.70
+        confidence = 0.70 if ny_mode != "Whipsaw Risk" else 0.64
+        wait_for_confirmations = []
+    elif ny_mode == "Whipsaw Risk" and (or30_ready or or60_ready) and not orb_trigger_seen:
+        trade_today = "Wait"
+        primary_reason = "Whipsaw remains elevated. OR is formed; wait for OR trigger or stronger daily-bias confirmation."
+        confidence = 0.60
+        wait_for_confirmations = [
+            "Wait for ORB 30m/60m or Failed ORB confirmation.",
+            "Require trigger direction to match daily/session bias.",
+            "Require volume participation and momentum agreement before entry.",
+        ]
     elif us_confirm and now < us_confirm:
         trade_today = "Wait"
         primary_reason = "Waiting for opening-hour confirmation window."
         confidence = 0.60
+        wait_for_confirmations = [
+            "Wait for opening-hour trigger confirmation.",
+            "Require confluence reaction score to improve.",
+        ]
     elif us_end and now > us_end and primary_trigger is None:
         trade_today = "No"
         primary_reason = "No valid trigger occurred during the US session."
         confidence = 0.72
+        wait_for_confirmations = []
     else:
         trade_today = "Wait"
         primary_reason = "Bias exists but no execution trigger has fired yet."
         confidence = 0.58
+        wait_for_confirmations = [
+            "Wait for primary trigger to fire.",
+            "Require aligned momentum and volume confirmation.",
+        ]
 
     last_price = float(df["close"].iloc[-1])
     day_high = float(df["high"].max())
@@ -1553,6 +2478,31 @@ def build_strategy_playbook(
 
     stdv_center = daily_vwap if daily_vwap is not None else last_price
     stdv_levels = _stdv_levels(df, center=stdv_center, length=20)
+    volatility_metrics = _volatility_pack(df, length=20)
+    volume_metrics = _volume_detector(df, length=20)
+    momentum_prediction = _momentum_prediction(
+        df,
+        ny_direction=ny_direction,
+        volatility=volatility_metrics,
+        volume=volume_metrics,
+    )
+    vwap_probabilities = _vwap_mean_reversion_vs_expansion(
+        df,
+        daily_vwap=daily_vwap,
+        windows=windows,
+        volume=volume_metrics,
+        momentum=momentum_prediction,
+        volatility=volatility_metrics,
+    )
+    vwap_dip_strength = _vwap_strength_after_dip(df, daily_vwap=daily_vwap)
+    performance_metrics = _performance_metrics(df)
+    expectation_summaries = _build_expectation_summaries(
+        vwap_dip=vwap_dip_strength,
+        performance=performance_metrics,
+        volatility=volatility_metrics,
+        volume=volume_metrics,
+        momentum=momentum_prediction,
+    )
 
     confluences: List[Dict[str, object]] = []
     for z in zones:
@@ -1683,6 +2633,99 @@ def build_strategy_playbook(
         now=now,
         windows=windows,
     )
+    risk_engine = _risk_engine(
+        last_price=last_price,
+        direction=ny_direction,
+        reference_rows=reference_rows,
+        target_ladder=target_ladder,
+        volatility=volatility_metrics,
+        volume=volume_metrics,
+        momentum=momentum_prediction,
+        vwap_prob=vwap_probabilities,
+    )
+    entry_style_suggestions = _attach_entry_confidence(
+        entry_styles=entry_style_suggestions,
+        risk_engine=risk_engine,
+        momentum=momentum_prediction,
+        volume=volume_metrics,
+        vwap_prob=vwap_probabilities,
+        ny_direction=ny_direction,
+        trade_today=trade_today,
+        primary_trigger=primary_trigger,
+        whipsaw_risk=whipsaw_risk,
+    )
+    entry_execution_tracker = _evaluate_entry_executions(
+        df=df,
+        entry_styles=entry_style_suggestions,
+        risk_engine=risk_engine,
+    )
+
+    # Confidence blend: retain existing logic but adjust using confluence analytics.
+    confidence += (float(risk_engine.get("quality_score", 50.0)) - 50.0) / 200.0
+    confidence += (float(momentum_prediction.get("confidence", 0.0)) - 20.0) / 400.0
+    if float(vwap_probabilities.get("expansion_prob", 50.0)) > float(vwap_probabilities.get("mean_reversion_prob", 50.0)):
+        confidence += 0.03
+    else:
+        confidence -= 0.02
+    confidence = max(0.20, min(0.92, confidence))
+
+    if trade_today == "Yes" and str(risk_engine.get("status", "Caution")) == "Caution":
+        trade_today = "Wait"
+        primary_reason = "Initial trigger detected, but risk-quality is weak. Wait for better confirmation before entry."
+        wait_for_confirmations = [
+            "Wait for trigger retest hold on the trigger side.",
+            "Require confluence reaction score >= 55.",
+            "Require RVOL to improve toward >= 1.0.",
+            "Require momentum to align with entry side.",
+        ]
+    if trade_today == "Wait" and str(risk_engine.get("status", "Caution")) == "High" and primary_trigger is not None:
+        trade_today = "Yes"
+        primary_reason = "Trigger + risk-quality alignment upgraded execution readiness."
+        wait_for_confirmations = []
+
+    # User-facing whipsaw labeling.
+    if ny_mode == "Whipsaw Risk":
+        trade_today = "Tradeable Whipsaw" if trade_today == "Yes" else "Untradeable Whipsaw"
+
+    if _trade_decision_bucket(trade_today) in {"Wait", "Yes"} and ny_direction in {"Bullish", "Bearish"}:
+        supporting_factors.append(
+            f"Risk engine: {risk_engine.get('status', 'Caution')} ({risk_engine.get('quality_score', 0.0):.1f})"
+        )
+    if str(volume_metrics.get("state", "normal")) == "low":
+        blocking_factors.append("Volume participation is below normal")
+    if ny_direction in {"Bullish", "Bearish"}:
+        m_pred = str(momentum_prediction.get("predicted", "Neutral"))
+        if m_pred in {"Bullish", "Bearish"} and m_pred != ny_direction:
+            blocking_factors.append("Momentum prediction conflicts with directional bias")
+
+    trigger_watchlist: List[Dict[str, object]] = []
+    if us_start:
+        trigger_watchlist.append(
+            {
+                "watch": "ORB 30m Confirmation",
+                "status": "Triggered" if any("ORB 30m" in n for n in active_trigger_names) else "Monitoring",
+                "ready_time": _fmt_ts(pd.to_datetime(us_start + dt.timedelta(minutes=30))),
+                "required_for": "Intraday confirmation",
+            }
+        )
+        trigger_watchlist.append(
+            {
+                "watch": "ORB 60m Confirmation",
+                "status": "Triggered" if any("ORB 60m" in n for n in active_trigger_names) else "Monitoring",
+                "ready_time": _fmt_ts(pd.to_datetime(us_start + dt.timedelta(minutes=60))),
+                "required_for": "Stronger continuation confirmation",
+            }
+        )
+
+    for c in confirmation_triggers:
+        trigger_watchlist.append(
+            {
+                "watch": c.get("name", "Bias Confirmation"),
+                "status": "Active",
+                "ready_time": c.get("time", "n/a"),
+                "required_for": "Daily bias alignment",
+            }
+        )
     open_pattern_watch = _us_open_reclaim_watch(df=df, trade_date=trade_date, now=now, confluences=confluences)
 
     return {
@@ -1692,16 +2735,28 @@ def build_strategy_playbook(
             "ny_direction": ny_direction,
             "confidence": float(confidence),
             "primary_reason": primary_reason,
+            "wait_for_confirmations": wait_for_confirmations,
             "supporting_factors": supporting_factors,
             "blocking_factors": blocking_factors,
             "whipsaw_ratio": float(whipsaw_ratio) if whipsaw_ratio is not None else None,
         },
         "triggers": triggers,
+        "confirmation_triggers": confirmation_triggers,
+        "trigger_watchlist": trigger_watchlist,
         "primary_trigger": primary_trigger,
         "confluences": confluences,
         "targets": target_ladder,
         "vwap_levels": vwap_levels,
         "stdv_levels": stdv_levels,
+        "volatility_metrics": volatility_metrics,
+        "volume_detector": volume_metrics,
+        "momentum_prediction": momentum_prediction,
+        "vwap_probabilities": vwap_probabilities,
+        "vwap_strength_after_dip": vwap_dip_strength,
+        "risk_engine": risk_engine,
+        "entry_execution_tracker": entry_execution_tracker,
+        "performance_metrics": performance_metrics,
+        "expectation_summaries": expectation_summaries,
         "power_hour": {
             "focus": power_hour_focus,
             "bias": power_hour_bias,

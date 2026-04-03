@@ -253,6 +253,104 @@ def render_definitions_explanations() -> None:
         "- Invalidation: no VWAP reclaim by 10:30 ET, or post-trigger failure below setup low."
     )
 
+    st.markdown("## New Playbook Analytics")
+    st.markdown(
+        "### Continuous Trigger Monitoring"
+    )
+    st.markdown(
+        "The playbook now keeps monitoring for additional confirmations after the first trigger fires. "
+        "Overnight confirmations can start context, while OR triggers (30m and 60m) can still upgrade or downgrade execution confidence."
+    )
+    st.markdown(
+        "ORB timing rule: ORB 30m only after 10:00 ET and ORB 60m only after 10:30 ET, using current-day windows only."
+    )
+
+    st.markdown("### Risk Engine")
+    st.markdown(
+        "Risk engine combines directional bias, confluence zone context, volatility, volume participation, momentum, and VWAP probabilities. "
+        "It outputs side (long/short/wait), entry-stop-target, risk-reward, size guidance, and a risk-quality status."
+    )
+    st.markdown(
+        "General interpretation: higher risk-quality score is better. Low score means stand down or require stronger confirmation."
+    )
+
+    st.markdown("### Entry Confidence With Reasoning")
+    st.markdown(
+        "Each confluence entry suggestion includes an Entry Confidence score (0 to 100), a tier, and explicit reasoning."
+    )
+    st.markdown(
+        "The confidence score blends: risk quality, confluence reaction strength, momentum alignment, volume participation, "
+        "VWAP expansion/reversion context, trigger alignment, and penalties (whipsaw, invalidation, wait/no-trade state)."
+    )
+    st.markdown(
+        "Guide: below 55 is low confidence, 55-74 is moderate, 75+ is high confidence."
+    )
+
+    st.markdown("### Drawdown, EV, and Sharpe")
+    st.markdown(
+        "- Drawdown: peak-to-trough decline of the return curve. Closer to 0 percent is better."
+    )
+    st.markdown(
+        "- Expected value (EV): average edge per return observation. Positive is good, near zero is weak, negative is bad."
+    )
+    st.markdown(
+        "- Raw Sharpe: return mean divided by return standard deviation at native frequency."
+    )
+    st.markdown(
+        "Practical Sharpe guide: around 0.5 is modest, around 1.0 is good, above 1.5 is strong, below 0 is weak."
+    )
+
+    st.markdown("### NY VWAP Mean Reversion vs Expansion Probability")
+    st.markdown(
+        "This model estimates two probabilities during NY session:"
+    )
+    st.markdown(
+        "- Mean reversion probability: odds price rotates back toward daily VWAP."
+    )
+    st.markdown(
+        "- Expansion probability: odds price continues away from VWAP on the current side."
+    )
+    st.markdown(
+        "Inputs include price location vs VWAP, time above/below VWAP, RVOL, momentum tilt, and stretch."
+    )
+
+    st.markdown("### VWAP Strength After Dip Score")
+    st.markdown(
+        "Dip-strength score is reported out of 100 and qualifies reclaim quality after price dips below VWAP and reclaims it."
+    )
+    st.markdown(
+        "Guide: below 45 is weak, 45-69 is moderate, 70+ is strong reclaim quality."
+    )
+    st.markdown(
+        "The model also provides expected entry timing and retest behavior guidance."
+    )
+    st.markdown(
+        "It now also includes a brief 'What to expect' summary describing likely rest-of-day behavior based on current dip-quality data."
+    )
+
+    st.markdown("### Volatility Regime, Volume Detector, and Momentum Prediction")
+    st.markdown(
+        "- Volatility regime: compressed, normal, or expanded based on rolling STDV percentiles."
+    )
+    st.markdown(
+        "Compressed often means tighter ranges and breakout potential, expanded means larger swings and higher invalidation risk."
+    )
+    st.markdown(
+        "- Volume detector uses RVOL and participation scoring. RVOL below 0.85 is weak, 0.85-1.25 is normal, above 1.25 is strong."
+    )
+    st.markdown(
+        "- Momentum prediction provides bullish vs bearish probability split and confidence. "
+        "Confidence below 15 is weak, 15-35 is moderate, above 35 is strong."
+    )
+    st.markdown(
+        "Each block includes a brief 'What to expect' summary for practical rest-of-day expectations."
+    )
+
+    st.markdown("### Drawdown, EV, and Sharpe Practical Outlook")
+    st.markdown(
+        "The app now displays a short 'What to expect' line translating current drawdown, EV, and Sharpe into an execution stance for the rest of the session."
+    )
+
     st.markdown("## How Data Determines Price Action")
     st.markdown(
         "- VWAP posture guides mean-reversion vs continuation around fair value."

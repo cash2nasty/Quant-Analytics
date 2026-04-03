@@ -38,11 +38,27 @@ def _prepare_df(df: pd.DataFrame) -> pd.DataFrame:
     return out[keep].sort_values("timestamp").reset_index(drop=True)
 
 
+def _trading_day_bounds(trading_day: dt.date) -> tuple[pd.Timestamp, pd.Timestamp]:
+    start = pd.Timestamp.combine(trading_day - dt.timedelta(days=1), dt.time(18, 0))
+    end = pd.Timestamp.combine(trading_day, dt.time(16, 59, 59))
+    return start, end
+
+
+def _slice_trading_day(df: pd.DataFrame, trading_day: dt.date) -> pd.DataFrame:
+    if df is None or df.empty or "timestamp" not in df.columns:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+    start, end = _trading_day_bounds(trading_day)
+    out = df.copy()
+    out["timestamp"] = pd.to_datetime(out["timestamp"])
+    mask = (out["timestamp"] >= start) & (out["timestamp"] <= end)
+    return out.loc[mask].sort_values("timestamp").reset_index(drop=True)
+
+
 def _status_color(value: str) -> str:
     v = (value or "").lower()
-    if v in {"yes", "bullish", "fresh", "tested", "retested"}:
+    if v in {"yes", "bullish", "fresh", "tested", "retested", "tradeable whipsaw"}:
         return "🟢"
-    if v in {"no", "bearish", "invalidated"}:
+    if v in {"no", "bearish", "invalidated", "untradeable whipsaw"}:
         return "🔴"
     return "🟡"
 
@@ -65,6 +81,9 @@ def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
     vwap_levels = playbook.get("vwap_levels", []) or []
     power_hour = playbook.get("power_hour", {}) or {}
     open_watch = playbook.get("open_pattern_watch", {}) or {}
+    risk_engine = playbook.get("risk_engine", {}) or {}
+    vwap_probs = playbook.get("vwap_probabilities", {}) or {}
+    momentum = playbook.get("momentum_prediction", {}) or {}
 
     trade_today = str(decision.get("trade_today", "Wait"))
     ny_mode = str(decision.get("ny_mode", "n/a"))
@@ -93,7 +112,7 @@ def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
     bullets: list[str] = []
     if top_setup:
         bullets.append(
-            f"Entry focus: {top_setup.get('Setup', 'n/a')} — {top_setup.get('IfThen', 'n/a')}"
+            f"Entry focus: {top_setup.get('Setup', 'n/a')} ({top_setup.get('Action', 'Wait')}) — {top_setup.get('IfThen', 'n/a')}"
         )
         bullets.append(
             f"Execution trigger: {top_setup.get('Trigger', 'n/a')} | TF: {top_setup.get('Execution TF', 'n/a')} | Session: {top_setup.get('Session', 'n/a')}"
@@ -152,6 +171,24 @@ def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
             f"US Open Pattern Watch: {open_watch.get('status', 'Not Active')} ({float(open_watch.get('confidence', 0.0)):.0f}% confidence) — {open_watch.get('reason', 'n/a')}"
         )
 
+    if risk_engine:
+        bullets.append(
+            f"Risk engine: {risk_engine.get('status', 'Caution')} | side {risk_engine.get('side', 'Wait')} | R:R {risk_engine.get('rr', 'n/a')}"
+        )
+
+    if vwap_probs:
+        bullets.append(
+            "NY VWAP probabilities: "
+            f"reversion {float(vwap_probs.get('mean_reversion_prob', 50.0)):.1f}% | "
+            f"expansion {float(vwap_probs.get('expansion_prob', 50.0)):.1f}%"
+        )
+
+    if momentum:
+        bullets.append(
+            f"Momentum model: {momentum.get('predicted', 'Neutral')} "
+            f"(up {float(momentum.get('prob_up', 50.0)):.1f}% / down {float(momentum.get('prob_down', 50.0)):.1f}%)"
+        )
+
     support = decision.get("supporting_factors", []) or []
     block = decision.get("blocking_factors", []) or []
     if support:
@@ -196,6 +233,8 @@ def _confluence_id(row: Dict[str, Any]) -> str:
 def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
     decision = playbook.get("decision", {}) or {}
     trigger = playbook.get("primary_trigger") or {}
+    triggers = playbook.get("triggers", []) or []
+    confirmations = playbook.get("confirmation_triggers", []) or []
     entry_rows = playbook.get("entry_blueprints", []) or []
     entry_style_rows = playbook.get("confluence_entry_styles", []) or []
     power_hour = playbook.get("power_hour", {}) or {}
@@ -220,6 +259,7 @@ def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
     entry_signature = [
         {
             "Setup": str(r.get("Setup", "n/a")),
+            "Action": str(r.get("Action", "Wait")),
             "IfThen": str(r.get("IfThen", "n/a")),
             "Trigger": str(r.get("Trigger", "n/a")),
             "Confluence Entry": str(r.get("Confluence Entry", "n/a")),
@@ -245,6 +285,8 @@ def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
             "confluence": str(row.get("Confluence", "n/a")),
             "formed_time": str(row.get("Formed Time", "n/a")),
             "suggested_entry": str(row.get("Suggested Entry", "n/a")),
+            "action": str(row.get("Action", "Wait")),
+            "side": str(row.get("Side", "Neutral")),
             "exit": str(row.get("Exit", "n/a")),
             "tap_hit": str(row.get("Tap Hit", "No")),
             "tap_time": str(row.get("Tap Time", "n/a")),
@@ -259,6 +301,8 @@ def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
             "reaction_time": str(row.get("Reaction Time", "n/a")),
             "reaction_why": str(row.get("Reaction Why", "n/a")),
             "entry_style_reason": str(row.get("Entry Style Reason", row.get("Reason", "n/a"))),
+            "expected_retests": str(row.get("Expected Retests", "n/a")),
+            "entry_timing": str(row.get("Entry Timing", "n/a")),
             "reason": str(row.get("Reason", "n/a")),
         }
 
@@ -278,6 +322,24 @@ def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
             "details": str(trigger.get("details", "")),
             "must_happen": str(trigger.get("must_happen", "")),
         },
+        "triggers": [
+            {
+                "name": str(t.get("name", "")),
+                "direction": str(t.get("direction", "")),
+                "time": str(t.get("time", "")),
+                "details": str(t.get("details", "")),
+            }
+            for t in triggers
+        ],
+        "confirmations": [
+            {
+                "name": str(t.get("name", "")),
+                "direction": str(t.get("direction", "")),
+                "time": str(t.get("time", "")),
+                "details": str(t.get("details", "")),
+            }
+            for t in confirmations
+        ],
         "entry": entry_signature,
         "entry_styles": entry_style_map,
         "power_hour": {
@@ -380,6 +442,26 @@ def _build_update_events(prev_snapshot: Dict[str, Any], curr_snapshot: Dict[str,
         event["event_time"] = curr_trigger.get("time", reported_at)
         event["why"] = curr_trigger.get("details", "Trigger conditions were re-evaluated.")
         event["expect"] = curr_trigger.get("must_happen", "Watch for retest/continuation confirmation.")
+        events.append(event)
+
+    prev_triggers = prev_snapshot.get("triggers", []) or []
+    curr_triggers = curr_snapshot.get("triggers", []) or []
+    if prev_triggers != curr_triggers:
+        prev_names = [str(t.get("name", "")) for t in prev_triggers if t.get("name")]
+        curr_names = [str(t.get("name", "")) for t in curr_triggers if t.get("name")]
+        event = _event_base(
+            reported_at,
+            "trigger_monitoring_change",
+            ["Trigger Detection", "Important Updates"],
+            "Trigger Monitor",
+            "Trigger monitoring list changed.",
+        )
+        event["before"] = ", ".join(prev_names) if prev_names else "No triggers"
+        event["after"] = ", ".join(curr_names) if curr_names else "No triggers"
+        latest_time = curr_triggers[-1].get("time", reported_at) if curr_triggers else reported_at
+        event["event_time"] = latest_time
+        event["why"] = "The model keeps scanning for additional confirmations even after first trigger." 
+        event["expect"] = "Continue monitoring OR and bias-confirmation triggers for upgrades/downgrades."
         events.append(event)
 
     prev_entry = prev_snapshot.get("entry", [])
@@ -830,7 +912,8 @@ def _render_market_updates_panel(events: List[Dict[str, Any]], panel_key: str = 
     for event in filtered:
         if single_mode and selected_one in detail_section_filters:
             st.markdown('<div class="market-update-item">', unsafe_allow_html=True)
-            st.write(f"**Time:** {event.get('reported_at', 'n/a')}")
+            st.write(f"**Reported at:** {event.get('reported_at', 'n/a')}")
+            st.write(f"**Event time:** {event.get('event_time', 'n/a')}")
             st.write(f"**What happened:** {event.get('summary', 'n/a')}")
             st.write(f"**Before:** {event.get('before', 'n/a')}")
             st.write(f"**After:** {event.get('after', 'n/a')}")
@@ -843,7 +926,8 @@ def _render_market_updates_panel(events: List[Dict[str, Any]], panel_key: str = 
 
         if single_mode and selected_one in confluence_detail_filters:
             st.markdown('<div class="market-update-item">', unsafe_allow_html=True)
-            st.write(f"**Time:** {event.get('reported_at', 'n/a')}")
+            st.write(f"**Reported at:** {event.get('reported_at', 'n/a')}")
+            st.write(f"**Event time:** {event.get('event_time', 'n/a')}")
             st.write(f"**What happened:** {event.get('summary', 'n/a')}")
             st.write(f"**Formed time:** {event.get('formed_time', event.get('event_time', 'n/a'))}")
             st.write(f"**Where:** {event.get('where', 'n/a')}")
@@ -855,7 +939,7 @@ def _render_market_updates_panel(events: List[Dict[str, Any]], panel_key: str = 
 
         st.markdown('<div class="market-update-item">', unsafe_allow_html=True)
         st.write(
-            f"{event.get('reported_at', 'n/a')} | {event.get('summary', 'n/a')} | {event.get('where', 'n/a')}"
+            f"{event.get('reported_at', 'n/a')} | event: {event.get('event_time', 'n/a')} | {event.get('summary', 'n/a')} | {event.get('where', 'n/a')}"
         )
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -968,36 +1052,56 @@ def render_strategy_playbook() -> None:
         used_ticker = ""
 
     prev_date = get_prev_trading_day(selected_date)
+    prev_prev_date = get_prev_trading_day(prev_date)
+
     res_prev = fetch_intraday_ohlcv(symbol, prev_date)
     if isinstance(res_prev, tuple):
         df_prev, _ = res_prev
     else:
         df_prev = res_prev
 
+    res_prev_prev = fetch_intraday_ohlcv(symbol, prev_prev_date)
+    if isinstance(res_prev_prev, tuple):
+        df_prev_prev, _ = res_prev_prev
+    else:
+        df_prev_prev = res_prev_prev
+
     df_today = _prepare_df(df_today)
     df_prev = _prepare_df(df_prev)
+    df_prev_prev = _prepare_df(df_prev_prev)
 
-    has_today = df_today is not None and not df_today.empty
-    has_prev = df_prev is not None and not df_prev.empty
+    current_trading_source = pd.concat([df_prev, df_today], ignore_index=True).sort_values("timestamp")
+    previous_trading_source = pd.concat([df_prev_prev, df_prev], ignore_index=True).sort_values("timestamp")
+
+    df_trading_day = _slice_trading_day(current_trading_source, selected_date)
+    df_prev_trading_day = _slice_trading_day(previous_trading_source, prev_date)
+
+    has_today = df_trading_day is not None and not df_trading_day.empty
+    has_prev = df_prev_trading_day is not None and not df_prev_trading_day.empty
+
+    td_start, td_end = _trading_day_bounds(selected_date)
 
     st.caption(f"Data source ticker: {used_ticker or symbol}")
+    st.caption(
+        f"Trading day window: {td_start.strftime('%Y-%m-%d %H:%M')} to {td_end.strftime('%Y-%m-%d %H:%M')} ET"
+    )
 
     if not has_today and not has_prev:
-        st.warning("No intraday data available for selected symbol/date.")
+        st.warning("No intraday data available for selected trading-day window (18:00 to 16:59 ET).")
         return
 
     if has_today and has_prev:
-        session_source = pd.concat([df_prev, df_today], ignore_index=True).sort_values("timestamp")
+        session_source = pd.concat([df_prev_trading_day, df_trading_day], ignore_index=True).sort_values("timestamp")
     else:
-        session_source = df_today if has_today else df_prev
+        session_source = df_trading_day if has_today else df_prev_trading_day
 
     sessions = compute_session_stats(session_source, selected_date) if session_source is not None else {}
-    patterns = detect_patterns(sessions, df_today if has_today else None, df_prev if has_prev else None)
+    patterns = detect_patterns(sessions, df_trading_day if has_today else None, df_prev_trading_day if has_prev else None)
     zones = build_htf_zones(session_source) if session_source is not None and not session_source.empty else []
 
     playbook = build_strategy_playbook(
-        df_today=df_today if has_today else session_source,
-        df_prev=df_prev if has_prev else None,
+        df_today=df_trading_day if has_today else session_source,
+        df_prev=df_prev_trading_day if has_prev else None,
         sessions=sessions,
         patterns=patterns,
         zones=zones,
@@ -1041,6 +1145,7 @@ def render_strategy_playbook() -> None:
             )
 
     decision = playbook.get("decision", {})
+    expectation_summaries = playbook.get("expectation_summaries", {}) or {}
 
     st.markdown("### Trade Decision")
     c1, c2, c3, c4 = st.columns(4)
@@ -1050,6 +1155,11 @@ def render_strategy_playbook() -> None:
     c4.metric("Confidence", f"{100.0 * float(decision.get('confidence', 0.0)):.0f}%")
 
     st.info(decision.get("primary_reason", "No reason available."))
+    wait_for = decision.get("wait_for_confirmations", []) or []
+    if wait_for:
+        st.markdown("**Wait For These Confirmations**")
+        for item in wait_for:
+            st.write(f"- {item}")
 
     reasons_col1, reasons_col2 = st.columns(2)
     with reasons_col1:
@@ -1080,6 +1190,8 @@ def render_strategy_playbook() -> None:
             f"Primary Trigger: {primary_trigger.get('name')} | {primary_trigger.get('direction')} | "
             f"{primary_trigger.get('time')} @ {primary_trigger.get('price'):.2f} | TF {primary_trigger.get('timeframe')}"
         )
+        st.caption("Monitoring remains active for OR and bias-confirmation triggers even after this trigger fired.")
+        st.caption("ORB triggers are evaluated from current-day OR windows only (post 10:00 / 10:30 ET).")
         st.caption(primary_trigger.get("details", ""))
         st.markdown("**What happened**")
         st.write(f"- {primary_trigger.get('what_happened', 'n/a')}")
@@ -1095,6 +1207,16 @@ def render_strategy_playbook() -> None:
     triggers = playbook.get("triggers", [])
     if triggers:
         st.dataframe(pd.DataFrame(triggers), use_container_width=True)
+
+    confirmations = playbook.get("confirmation_triggers", []) or []
+    if confirmations:
+        st.markdown("**Bias Confirmation Triggers**")
+        st.dataframe(pd.DataFrame(confirmations), use_container_width=True)
+
+    watchlist = playbook.get("trigger_watchlist", []) or []
+    if watchlist:
+        st.markdown("**Trigger Watchlist (Continuous Monitoring)**")
+        st.dataframe(pd.DataFrame(watchlist), use_container_width=True)
 
     st.markdown("### US Open Pattern Watch")
     open_watch = playbook.get("open_pattern_watch", {}) or {}
@@ -1168,8 +1290,127 @@ def render_strategy_playbook() -> None:
     style_rows = playbook.get("confluence_entry_styles", []) or []
     if style_rows:
         st.dataframe(pd.DataFrame(style_rows), use_container_width=True)
+        st.markdown("**Confluence Entry Timing Summary**")
+        for row in style_rows[:3]:
+            st.write(
+                "- "
+                f"{row.get('Confluence', 'n/a')} | {row.get('Action', 'Wait')} | "
+                f"confidence {row.get('Entry Confidence', 'n/a')} ({row.get('Confidence Tier', 'n/a')}) | "
+                f"Expected retests: {row.get('Expected Retests', 'n/a')} | "
+                f"Entry timing: {row.get('Entry Timing', 'n/a')}"
+            )
+
+        st.markdown("**Entry Confidence And Reasoning**")
+        for row in style_rows[:5]:
+            st.write(
+                "- "
+                f"{row.get('Confluence', 'n/a')} -> "
+                f"{row.get('Entry Confidence', 'n/a')}/100 ({row.get('Confidence Tier', 'n/a')})"
+            )
+            st.caption(str(row.get("Confidence Reasoning", "n/a")))
     else:
         st.write("No confluence entry style suggestions available.")
+
+    st.markdown("### Entry Execution Tracker")
+    execution_rows = playbook.get("entry_execution_tracker", []) or []
+    if execution_rows:
+        st.dataframe(pd.DataFrame(execution_rows), use_container_width=True)
+        successful = sum(1 for r in execution_rows if str(r.get("Outcome", "")).lower() == "successful")
+        failed = sum(1 for r in execution_rows if str(r.get("Outcome", "")).lower() == "failed")
+        open_count = sum(1 for r in execution_rows if str(r.get("Outcome", "")).lower() == "open")
+        pending = sum(1 for r in execution_rows if str(r.get("Outcome", "")).lower() == "pending")
+        st.caption(
+            f"Execution summary: successful={successful}, failed={failed}, open={open_count}, pending={pending}."
+        )
+    else:
+        st.write("No execution records available yet.")
+
+    st.markdown("### Risk Engine")
+    risk_engine = playbook.get("risk_engine", {}) or {}
+    if risk_engine:
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        rc1.metric("Side", str(risk_engine.get("side", "Wait")))
+        rc2.metric("R:R", f"{float(risk_engine.get('rr', 0.0) or 0.0):.2f}" if risk_engine.get("rr") is not None else "n/a")
+        rc3.metric("Quality", f"{float(risk_engine.get('quality_score', 0.0)):.1f}")
+        rc4.metric("Status", str(risk_engine.get("status", "Caution")))
+        st.write(
+            "- "
+            f"Entry {risk_engine.get('entry', 'n/a')} | Stop {risk_engine.get('stop', 'n/a')} | "
+            f"Target {risk_engine.get('target', 'n/a')} | Size/10k {risk_engine.get('size_contracts_10k', 0)}"
+        )
+        st.caption(str(risk_engine.get("notes", "n/a")))
+
+    st.markdown("### VWAP Reversion vs Expansion (NY)")
+    vwap_probs = playbook.get("vwap_probabilities", {}) or {}
+    if vwap_probs:
+        vc1, vc2, vc3 = st.columns(3)
+        vc1.metric("Price vs VWAP", str(vwap_probs.get("price_vs_vwap", "n/a")))
+        vc2.metric("Mean Reversion %", f"{float(vwap_probs.get('mean_reversion_prob', 50.0)):.1f}%")
+        vc3.metric("Expansion %", f"{float(vwap_probs.get('expansion_prob', 50.0)):.1f}%")
+        st.caption(str(vwap_probs.get("note", "n/a")))
+
+    st.markdown("### VWAP Strength After Dip")
+    dip = playbook.get("vwap_strength_after_dip", {}) or {}
+    if dip:
+        dc1, dc2, dc3 = st.columns(3)
+        dc1.metric("Score", str(dip.get("score_out_of", f"{float(dip.get('score', 0.0)):.1f}/100")))
+        dc2.metric("Label", str(dip.get("label", "Not Active")))
+        dc3.metric("Reclaim Time", str(dip.get("reclaim_time", "n/a")))
+        st.write(f"- Entry timing: {dip.get('entry_timing', 'n/a')}")
+        st.write(f"- Good vs bad: {dip.get('good_bad_guide', 'n/a')}")
+        st.write(f"- What to expect: {expectation_summaries.get('vwap_dip', dip.get('rest_of_day_assumption', 'n/a'))}")
+        st.caption(str(dip.get("note", "n/a")))
+
+    st.markdown("### Volatility, Volume, Momentum")
+    volm = playbook.get("volatility_metrics", {}) or {}
+    volume_det = playbook.get("volume_detector", {}) or {}
+    momentum = playbook.get("momentum_prediction", {}) or {}
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Vol Regime", str(volm.get("regime", "normal")))
+    mc2.metric("STDV", f"{float(volm.get('std', 0.0) or 0.0):.5f}" if volm.get("std") is not None else "n/a")
+    mc3.metric("RVOL", f"{float(volume_det.get('rvol', 0.0) or 0.0):.2f}" if volume_det.get("rvol") is not None else "n/a")
+    mc4.metric("Momentum Bias", str(momentum.get("predicted", "Neutral")))
+    st.write(
+        "- "
+        f"Momentum probs: up {float(momentum.get('prob_up', 50.0)):.1f}% / "
+        f"down {float(momentum.get('prob_down', 50.0)):.1f}%"
+    )
+    outcomes = volm.get("regime_outcomes", {}) or {}
+    if outcomes:
+        st.write("- Vol regime meanings:")
+        st.write(f"  - Compressed: {outcomes.get('compressed', 'n/a')}")
+        st.write(f"  - Normal: {outcomes.get('normal', 'n/a')}")
+        st.write(f"  - Expanded: {outcomes.get('expanded', 'n/a')}")
+    st.write(f"- Vol good vs bad: {volm.get('good_bad_guide', 'n/a')}")
+    st.write(f"- Volume good vs bad: {volume_det.get('good_bad_guide', 'n/a')}")
+    st.write(f"- Momentum good vs bad: {momentum.get('good_bad_guide', 'n/a')}")
+    st.write(f"- What to expect (volatility): {expectation_summaries.get('volatility', volm.get('rest_of_day_assumption', 'n/a'))}")
+    st.write(f"- What to expect (volume): {expectation_summaries.get('volume', volume_det.get('rest_of_day_assumption', 'n/a'))}")
+    st.write(f"- What to expect (momentum): {expectation_summaries.get('momentum', momentum.get('rest_of_day_assumption', 'n/a'))}")
+    st.caption(str(volm.get("regime_note", "")))
+    st.caption(str(volume_det.get("note", "")))
+    st.caption(str(momentum.get("note", "")))
+
+    st.markdown("### Drawdown, EV, Sharpe")
+    perf = playbook.get("performance_metrics", {}) or {}
+    pc1, pc2, pc3, pc4 = st.columns(4)
+    pc1.metric("Max DD %", f"{float(perf.get('max_drawdown_pct', 0.0)):.2f}%")
+    pc2.metric("Current DD %", f"{float(perf.get('current_drawdown_pct', 0.0)):.2f}%")
+    pc3.metric("EV (bps)", f"{float(perf.get('expected_value_bps', 0.0)):.2f}")
+    pc4.metric("Raw Sharpe", f"{float(perf.get('raw_sharpe', 0.0)):.3f}")
+    st.write(
+        "- "
+        f"Annualized Sharpe: {float(perf.get('annualized_sharpe', 0.0)):.3f} | "
+        f"DD duration bars: {int(perf.get('drawdown_duration_bars', 0))}"
+    )
+    guides = perf.get("good_bad_guide", {}) or {}
+    if guides:
+        st.write("- Good vs bad interpretation:")
+        st.write(f"  - Drawdown: {guides.get('max_drawdown_pct', 'n/a')}")
+        st.write(f"  - EV: {guides.get('expected_value_bps', 'n/a')}")
+        st.write(f"  - Sharpe: {guides.get('raw_sharpe', 'n/a')}")
+    st.write(f"- What to expect: {expectation_summaries.get('performance', perf.get('rest_of_day_assumption', 'n/a'))}")
+    st.caption(str(perf.get("notes", "n/a")))
 
     st.markdown("### Daily Entry Capacity")
     capacity = playbook.get("daily_entry_capacity", {}) or {}

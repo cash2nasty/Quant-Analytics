@@ -2,6 +2,16 @@ import pandas as pd
 from typing import Optional
 
 
+def _coerce_ohlcv_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in ["high", "low", "close", "volume"]:
+        if col not in out.columns:
+            out[col] = 0.0
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+    out[["high", "low", "close", "volume"]] = out[["high", "low", "close", "volume"]].fillna(0.0)
+    return out
+
+
 def compute_daily_vwap(df: pd.DataFrame) -> pd.Series:
     """Compute intraday (per-date) VWAP and return a Series aligned with df.
 
@@ -12,7 +22,7 @@ def compute_daily_vwap(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
-    df = df.copy()
+    df = _coerce_ohlcv_numeric(df)
 
     # Ensure timestamp is available as a datetime series
     if "timestamp" in df.columns:
@@ -50,7 +60,7 @@ def compute_weekly_vwap(df: pd.DataFrame) -> pd.Series:
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
-    df = df.copy()
+    df = _coerce_ohlcv_numeric(df)
 
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -78,7 +88,7 @@ def compute_anchored_vwap(df: pd.DataFrame, anchor_ts: pd.Timestamp) -> pd.Serie
     if df is None or df.empty or anchor_ts is None:
         return pd.Series(dtype=float)
 
-    df = df.copy()
+    df = _coerce_ohlcv_numeric(df)
 
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"])
