@@ -54,6 +54,39 @@ def _slice_trading_day(df: pd.DataFrame, trading_day: dt.date) -> pd.DataFrame:
     return out.loc[mask].sort_values("timestamp").reset_index(drop=True)
 
 
+def _parse_hhmm(value: str) -> tuple[dt.time | None, str | None]:
+    text = str(value or "").strip()
+    if len(text) != 5 or text[2] != ":":
+        return None, "Use HH:MM format (for example 09:35 or 18:10)."
+    hh, mm = text[:2], text[3:5]
+    if not (hh.isdigit() and mm.isdigit()):
+        return None, "Use numeric HH:MM format only."
+    h = int(hh)
+    m = int(mm)
+    if h < 0 or h > 23 or m < 0 or m > 59:
+        return None, "Hour must be 00-23 and minute must be 00-59."
+    return dt.time(h, m), None
+
+
+def _resolve_trading_day_asof(selected_date: dt.date, hhmm: str) -> tuple[pd.Timestamp | None, str | None]:
+    t, err = _parse_hhmm(hhmm)
+    if err:
+        return None, err
+    if t is None:
+        return None, "Invalid time."
+
+    # Trading-day window is 18:00 (prior calendar day) through 16:59 (selected date).
+    if dt.time(17, 0) <= t <= dt.time(17, 59, 59):
+        return None, "Time must be inside trading-day window 18:00-16:59 ET."
+
+    if t >= dt.time(18, 0):
+        ts_date = selected_date - dt.timedelta(days=1)
+    else:
+        ts_date = selected_date
+
+    return pd.Timestamp.combine(ts_date, t), None
+
+
 def _status_color(value: str) -> str:
     v = (value or "").lower()
     if v in {"yes", "bullish", "fresh", "tested", "retested", "tradeable whipsaw"}:
@@ -175,6 +208,10 @@ def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
         bullets.append(
             f"Risk engine: {risk_engine.get('status', 'Caution')} | side {risk_engine.get('side', 'Wait')} | R:R {risk_engine.get('rr', 'n/a')}"
         )
+        if risk_engine.get("trade_summary"):
+            bullets.append(f"Risk engine summary: {risk_engine.get('trade_summary')}")
+        if risk_engine.get("expected_behavior"):
+            bullets.append(f"Expected behavior: {risk_engine.get('expected_behavior')}")
 
     if vwap_probs:
         bullets.append(
@@ -1086,26 +1123,77 @@ def render_strategy_playbook() -> None:
         f"Trading day window: {td_start.strftime('%Y-%m-%d %H:%M')} to {td_end.strftime('%Y-%m-%d %H:%M')} ET"
     )
 
+    mode_col, time_col, live_col = st.columns([1.2, 2.4, 1.2])
+    with mode_col:
+        view_mode = st.radio(
+            "View mode",
+            options=["Live", "Time Travel"],
+            horizontal=True,
+            key=f"playbook_view_mode::{symbol}::{selected_date.isoformat()}",
+        )
+
+    asof_ts: pd.Timestamp | None = None
+    asof_error: str | None = None
+    with time_col:
+        asof_input = st.text_input(
+            "As-of time (HH:MM)",
+            value="09:30",
+            key=f"playbook_asof_time::{symbol}::{selected_date.isoformat()}",
+            disabled=view_mode != "Time Travel",
+            help="Trading-day intervals are 18:00-16:59 ET.",
+        )
+    with live_col:
+        st.write("")
+        st.write("")
+        if st.button(
+            "Return To Live",
+            key=f"playbook_return_live::{symbol}::{selected_date.isoformat()}",
+            use_container_width=True,
+            disabled=view_mode == "Live",
+        ):
+            st.session_state[f"playbook_view_mode::{symbol}::{selected_date.isoformat()}"] = "Live"
+            st.rerun()
+
+    st.caption("Time entry uses 24-hour HH:MM. Valid trading-day intervals: 18:00-23:59 and 00:00-16:59 ET.")
+
+    if view_mode == "Time Travel":
+        asof_ts, asof_error = _resolve_trading_day_asof(selected_date, asof_input)
+        if asof_error:
+            st.warning(asof_error)
+        elif asof_ts is not None:
+            st.info(f"Time-travel active: showing page state as of {asof_ts.strftime('%Y-%m-%d %H:%M')} ET.")
+
     if not has_today and not has_prev:
         st.warning("No intraday data available for selected trading-day window (18:00 to 16:59 ET).")
         return
 
-    if has_today and has_prev:
-        session_source = pd.concat([df_prev_trading_day, df_trading_day], ignore_index=True).sort_values("timestamp")
+    df_trading_day_view = df_trading_day
+    if view_mode == "Time Travel" and asof_ts is not None:
+        df_trading_day_view = df_trading_day[df_trading_day["timestamp"] <= asof_ts].reset_index(drop=True)
+
+    has_today_view = df_trading_day_view is not None and not df_trading_day_view.empty
+    if view_mode == "Time Travel" and not has_today_view:
+        st.warning("No bars are available yet by the selected time in this trading-day window.")
+        return
+
+    if has_today_view and has_prev:
+        session_source = pd.concat([df_prev_trading_day, df_trading_day_view], ignore_index=True).sort_values("timestamp")
     else:
-        session_source = df_trading_day if has_today else df_prev_trading_day
+        session_source = df_trading_day_view if has_today_view else df_prev_trading_day
 
     sessions = compute_session_stats(session_source, selected_date) if session_source is not None else {}
-    patterns = detect_patterns(sessions, df_trading_day if has_today else None, df_prev_trading_day if has_prev else None)
+    patterns = detect_patterns(sessions, df_trading_day_view if has_today_view else None, df_prev_trading_day if has_prev else None)
     zones = build_htf_zones(session_source) if session_source is not None and not session_source.empty else []
 
+    run_now = asof_ts.to_pydatetime() if (view_mode == "Time Travel" and asof_ts is not None) else _now_et()
+
     playbook = build_strategy_playbook(
-        df_today=df_trading_day if has_today else session_source,
+        df_today=df_trading_day_view if has_today_view else session_source,
         df_prev=df_prev_trading_day if has_prev else None,
         sessions=sessions,
         patterns=patterns,
         zones=zones,
-        now_et=_now_et(),
+        now_et=run_now,
         whipsaw_threshold=float(whipsaw_threshold),
     )
 
@@ -1113,7 +1201,7 @@ def render_strategy_playbook() -> None:
         symbol=symbol,
         selected_date=selected_date,
         playbook=playbook,
-        now_et=_now_et(),
+        now_et=run_now,
     )
 
     header_left, header_right = st.columns([5, 1])
@@ -1289,56 +1377,294 @@ def render_strategy_playbook() -> None:
     st.markdown("### Confluence Entry Style Suggestions")
     style_rows = playbook.get("confluence_entry_styles", []) or []
     if style_rows:
-        st.dataframe(pd.DataFrame(style_rows), use_container_width=True)
+        style_df = pd.DataFrame(style_rows)
+        if "Suggested Time" in style_df.columns:
+            style_df["_suggested_time_sort"] = pd.to_datetime(style_df["Suggested Time"], errors="coerce")
+            style_df = style_df.sort_values("_suggested_time_sort", ascending=False, na_position="last")
+            style_df = style_df.drop(columns=["_suggested_time_sort"])
+        style_rows_sorted = style_df.to_dict("records")
+        style_df = style_df.rename(
+            columns={
+                "Session Marker": "Session marker",
+                "Suggested Time": "Suggested time",
+                "Entry Confidence": "Entry confidence",
+                "Confidence Tier": "Confidence tier",
+                "Confidence Reasoning": "Confidence reasoning",
+                "Execution Time": "Execution time",
+                "Exit Time": "Exit time",
+                "Min Target": "Min Target",
+                "Max Target": "Max Target",
+            }
+        )
+        ordered = [
+            "Session marker",
+            "Suggested time",
+            "Entry ETA (HH:MM)",
+            "Entry Window",
+            "Action",
+            "Confluence",
+            "Suggested Entry",
+            "Entry Price",
+            "Risk Pts(Ticks)",
+            "Target Pts(Ticks)",
+            "RR",
+            "Entry confidence",
+            "Confidence tier",
+            "Confidence reasoning",
+            "Min Target",
+            "Max Target",
+        ]
+        for c in ordered:
+            if c not in style_df.columns:
+                style_df[c] = "n/a"
+        st.dataframe(style_df[ordered], use_container_width=True)
         st.markdown("**Confluence Entry Timing Summary**")
-        for row in style_rows[:3]:
+        for row in style_rows_sorted[:3]:
             st.write(
                 "- "
                 f"{row.get('Confluence', 'n/a')} | {row.get('Action', 'Wait')} | "
                 f"confidence {row.get('Entry Confidence', 'n/a')} ({row.get('Confidence Tier', 'n/a')}) | "
+                f"Suggested: {row.get('Suggested Time', 'n/a')} | "
+                f"Expect entry at: {row.get('Entry ETA (HH:MM)', 'n/a')} ({row.get('Entry Window', 'n/a')}) | "
+                f"Confluence formed: {row.get('Formed Time', 'n/a')} | "
+                f"Confluence range: {row.get('Confluence Range', 'n/a')} | "
                 f"Expected retests: {row.get('Expected Retests', 'n/a')} | "
                 f"Entry timing: {row.get('Entry Timing', 'n/a')}"
             )
 
         st.markdown("**Entry Confidence And Reasoning**")
-        for row in style_rows[:5]:
+        for row in style_rows_sorted[:5]:
             st.write(
                 "- "
                 f"{row.get('Confluence', 'n/a')} -> "
-                f"{row.get('Entry Confidence', 'n/a')}/100 ({row.get('Confidence Tier', 'n/a')})"
+                f"{row.get('Entry Confidence', 'n/a')}/100 ({row.get('Confidence Tier', 'n/a')}) | "
+                f"Suggested: {row.get('Suggested Time', 'n/a')} | "
+                f"ETA: {row.get('Entry ETA (HH:MM)', 'n/a')} ({row.get('Entry Window', 'n/a')}) | "
+                f"Formed: {row.get('Formed Time', 'n/a')} | "
+                f"Range: {row.get('Confluence Range', 'n/a')}"
             )
             st.caption(str(row.get("Confidence Reasoning", "n/a")))
+            st.caption(str(row.get("Entry ETA Detail", "n/a")))
     else:
         st.write("No confluence entry style suggestions available.")
 
     st.markdown("### Entry Execution Tracker")
     execution_rows = playbook.get("entry_execution_tracker", []) or []
     if execution_rows:
-        st.dataframe(pd.DataFrame(execution_rows), use_container_width=True)
+        exec_df = pd.DataFrame(execution_rows)
+        if "Suggested Time" in exec_df.columns:
+            exec_df["_suggested_time_sort"] = pd.to_datetime(exec_df["Suggested Time"], errors="coerce")
+            exec_df = exec_df.sort_values("_suggested_time_sort", ascending=False, na_position="last")
+            exec_df = exec_df.drop(columns=["_suggested_time_sort"])
+        execution_rows_sorted = exec_df.to_dict("records")
+        exec_df = exec_df.rename(
+            columns={
+                "Session Marker": "Session marker",
+                "Suggested Time": "Suggested time",
+                "Entry Confidence": "Entry confidence",
+                "Confidence Tier": "Confidence tier",
+                "Confidence Reasoning": "Confidence reasoning",
+                "Execution Time": "Execution time",
+                "Exit Time": "Exit time",
+            }
+        )
+        ordered = [
+            "Session marker",
+            "Suggested time",
+            "Entry ETA (HH:MM)",
+            "Entry Window",
+            "Action",
+            "Confluence",
+            "Suggested Entry",
+            "Entry Price",
+            "Risk Pts(Ticks)",
+            "Target Pts(Ticks)",
+            "RR",
+            "Entry confidence",
+            "Confidence tier",
+            "Confidence reasoning",
+            "Executed",
+            "Execution time",
+            "Outcome",
+            "Exit time",
+            "Exit Price",
+            "Why",
+            "Min Target",
+            "Max Target",
+        ]
+        for c in ordered:
+            if c not in exec_df.columns:
+                exec_df[c] = "n/a"
+        st.dataframe(exec_df[ordered], use_container_width=True)
         successful = sum(1 for r in execution_rows if str(r.get("Outcome", "")).lower() == "successful")
         failed = sum(1 for r in execution_rows if str(r.get("Outcome", "")).lower() == "failed")
         open_count = sum(1 for r in execution_rows if str(r.get("Outcome", "")).lower() == "open")
         pending = sum(1 for r in execution_rows if str(r.get("Outcome", "")).lower() == "pending")
+        unfilled = sum(1 for r in execution_rows if str(r.get("Outcome", "")).lower() == "unfilled")
+        skipped = sum(1 for r in execution_rows if str(r.get("Outcome", "")).lower() == "skipped")
         st.caption(
-            f"Execution summary: successful={successful}, failed={failed}, open={open_count}, pending={pending}."
+            "Execution summary across all suggested entries for this trading day: "
+            f"successful={successful}, failed={failed}, open={open_count}, pending={pending}, unfilled={unfilled}, skipped={skipped}."
         )
+
+        st.markdown("**Entry Tracker Confidence And Reasoning**")
+        for row in execution_rows_sorted[:5]:
+            st.write(
+                "- "
+                f"{row.get('Confluence', 'n/a')} | Suggested: {row.get('Suggested Time', 'n/a')} | "
+                f"ETA: {row.get('Entry ETA (HH:MM)', 'n/a')} ({row.get('Entry Window', 'n/a')}) | "
+                f"Formed: {row.get('Confluence Formed Time', 'n/a')} | "
+                f"Range: {row.get('Confluence Range', 'n/a')} | "
+                f"Confidence {row.get('Entry Confidence', 'n/a')} ({row.get('Confidence Tier', 'n/a')})"
+            )
+            st.caption(str(row.get("Confidence Reasoning", row.get("Why", "n/a"))))
+            st.caption(str(row.get("Entry ETA Detail", "n/a")))
     else:
         st.write("No execution records available yet.")
 
     st.markdown("### Risk Engine")
     risk_engine = playbook.get("risk_engine", {}) or {}
+    trade_rows = playbook.get("confluence_entry_styles", []) or []
+    trade_options: list[tuple[str, dict]] = []
+    for row in trade_rows:
+        label = (
+            f"{row.get('Suggested Time', 'n/a')} | {row.get('Action', 'Wait')} | "
+            f"{row.get('Confluence', 'n/a')} | ETA {row.get('Entry ETA (HH:MM)', 'n/a')} | RR {row.get('RR', 'n/a')}"
+        )
+        trade_options.append((label, row))
+
+    selected_trade = None
+    if trade_options:
+        left_col, right_col = st.columns([2.5, 2.0])
+        with left_col:
+            st.markdown("**Risk Engine View**")
+        with right_col:
+            selected_label = st.selectbox(
+                "Suggested trade focus",
+                options=[lbl for lbl, _ in trade_options],
+                index=0,
+                key="risk_engine_trade_focus",
+            )
+        selected_trade = next((row for lbl, row in trade_options if lbl == selected_label), None)
+
     if risk_engine:
+        display_side = str(risk_engine.get("side", "Wait"))
+        display_rr = risk_engine.get("rr")
+        display_quality = float(risk_engine.get("quality_score", 0.0) or 0.0)
+        display_status = str(risk_engine.get("status", "Caution"))
+        display_entry = risk_engine.get("entry", "n/a")
+        display_stop = risk_engine.get("stop", "n/a")
+        display_target = risk_engine.get("target", "n/a")
+        display_size = risk_engine.get("size_contracts_10k", 0)
+        display_suggested_target = risk_engine.get("suggested_target", "n/a")
+        display_min_target = risk_engine.get("minimum_target", "n/a")
+        display_max_target = risk_engine.get("maximum_target", "n/a")
+        display_notes = str(risk_engine.get("notes", "n/a"))
+        alignment_factors = risk_engine.get("alignment_factors", []) or []
+
+        if selected_trade is not None:
+            display_side = str(selected_trade.get("Action", "Wait"))
+            try:
+                display_rr = float(selected_trade.get("RR", 0.0))
+            except Exception:
+                display_rr = None
+            try:
+                display_quality = float(selected_trade.get("Entry Confidence", 0.0) or 0.0)
+            except Exception:
+                display_quality = 0.0
+            display_status = str(selected_trade.get("Confidence Tier", "n/a"))
+            display_entry = selected_trade.get("Entry Price", "n/a")
+            display_stop = "n/a"
+            display_target = selected_trade.get("Min Target", selected_trade.get("Max Target", "n/a"))
+            display_size = "n/a"
+            display_suggested_target = selected_trade.get("Preferred Target Price", selected_trade.get("Min Target", "n/a"))
+            display_min_target = selected_trade.get("Min Target", "n/a")
+            display_max_target = selected_trade.get("Max Target", "n/a")
+            display_notes = (
+                f"Trade-focused view for {selected_trade.get('Confluence', 'selected setup')}. "
+                f"Suggested at {selected_trade.get('Suggested Time', 'n/a')} with RR {selected_trade.get('RR', 'n/a')}."
+            )
+            reasoning = str(selected_trade.get("Confidence Reasoning", selected_trade.get("Reason", "n/a")))
+            alignment_factors = [f"Confluence range: {selected_trade.get('Confluence Range', 'n/a')}"]
+            alignment_factors.extend([part.strip() for part in reasoning.split(";") if part.strip()][:6])
+
         rc1, rc2, rc3, rc4 = st.columns(4)
-        rc1.metric("Side", str(risk_engine.get("side", "Wait")))
-        rc2.metric("R:R", f"{float(risk_engine.get('rr', 0.0) or 0.0):.2f}" if risk_engine.get("rr") is not None else "n/a")
-        rc3.metric("Quality", f"{float(risk_engine.get('quality_score', 0.0)):.1f}")
-        rc4.metric("Status", str(risk_engine.get("status", "Caution")))
+        rc1.metric("Side", display_side)
+        rc2.metric("R:R", f"{float(display_rr):.2f}" if display_rr is not None else "n/a")
+        rc3.metric("Quality", f"{display_quality:.1f}" if display_quality else "n/a")
+        rc4.metric("Status", display_status)
         st.write(
             "- "
-            f"Entry {risk_engine.get('entry', 'n/a')} | Stop {risk_engine.get('stop', 'n/a')} | "
-            f"Target {risk_engine.get('target', 'n/a')} | Size/10k {risk_engine.get('size_contracts_10k', 0)}"
+            f"Entry {display_entry} | Stop {display_stop} | "
+            f"Target {display_target} | Size/10k {display_size}"
         )
-        st.caption(str(risk_engine.get("notes", "n/a")))
+        st.write(
+            "- "
+            f"Suggested target {display_suggested_target} | "
+            f"Minimum target {display_min_target} | "
+            f"Maximum target {display_max_target}"
+        )
+        st.caption(display_notes)
+
+        if alignment_factors:
+            st.markdown("**What Aligned For This Risk Read**")
+            for item in alignment_factors:
+                st.write(f"- {item}")
+
+        if selected_trade is not None:
+            st.caption("Showing selected-trade-driven risk view. Global risk model context is listed below.")
+            st.write(
+                "- "
+                f"Global model snapshot: side {risk_engine.get('side', 'Wait')} | "
+                f"RR {risk_engine.get('rr', 'n/a')} | quality {risk_engine.get('quality_score', 'n/a')}"
+            )
+
+        if risk_engine.get("trade_summary"):
+            st.markdown("**Trade Summary**")
+            st.write(f"- {risk_engine.get('trade_summary')}")
+        if risk_engine.get("expected_behavior"):
+            st.markdown("**What We Expect If Entered**")
+            st.write(f"- {risk_engine.get('expected_behavior')}")
+        if risk_engine.get("post_trade_assumption"):
+            st.markdown("**What Must Stay True After Entry**")
+            st.write(f"- {risk_engine.get('post_trade_assumption')}")
+
+        strengthening = risk_engine.get("strengthening_alignments", []) or []
+        if strengthening:
+            st.markdown("**What Would Strengthen This Setup (And Chance It Happens)**")
+            for item in strengthening:
+                st.write(f"- {item}")
+
+        if selected_trade is not None:
+            st.markdown("**Selected Suggested Trade Details**")
+            st.write(
+                "- "
+                f"Suggested: {selected_trade.get('Suggested Time', 'n/a')} | "
+                f"Expected entry: {selected_trade.get('Entry ETA (HH:MM)', 'n/a')} ({selected_trade.get('Entry Window', 'n/a')}) | "
+                f"Action: {selected_trade.get('Action', 'Wait')} | "
+                f"Confluence: {selected_trade.get('Confluence', 'n/a')} | "
+                f"Range: {selected_trade.get('Confluence Range', 'n/a')}"
+            )
+            st.write(
+                "- "
+                f"Entry: {selected_trade.get('Entry Price', 'n/a')} | "
+                f"Risk: {selected_trade.get('Risk Pts(Ticks)', 'n/a')} | "
+                f"Target: {selected_trade.get('Target Pts(Ticks)', 'n/a')} | "
+                f"RR: {selected_trade.get('RR', 'n/a')}"
+            )
+            st.write(
+                "- "
+                f"Confidence: {selected_trade.get('Entry Confidence', 'n/a')} "
+                f"({selected_trade.get('Confidence Tier', 'n/a')})"
+            )
+            st.caption(str(selected_trade.get("Confidence Reasoning", selected_trade.get("Reason", "n/a"))))
+            st.caption(str(selected_trade.get("Entry ETA Detail", "n/a")))
+
+        waiting_items = risk_engine.get("waiting_for_confirmations", []) or []
+        if waiting_items and (risk_engine.get("stop") is None or risk_engine.get("target") is None):
+            st.markdown("**Risk Engine Waiting For Confirmations**")
+            for item in waiting_items:
+                st.write(f"- {item}")
 
     st.markdown("### VWAP Reversion vs Expansion (NY)")
     vwap_probs = playbook.get("vwap_probabilities", {}) or {}
@@ -1518,7 +1844,7 @@ def render_strategy_playbook() -> None:
         st.write(f"- {line}")
 
     _run_auto_refresh(
-        auto_refresh=bool(auto_refresh),
+        auto_refresh=bool(auto_refresh) and view_mode == "Live",
         selected_date=selected_date,
         today=today,
         refresh_seconds=int(refresh_seconds),

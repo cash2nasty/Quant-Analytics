@@ -504,12 +504,18 @@ def _build_expectation_summaries(
     volume: Dict[str, object],
     momentum: Dict[str, object],
 ) -> Dict[str, str]:
+    def _expand(msg: object) -> str:
+        text = str(msg or "n/a").strip()
+        if not text or text.lower() == "n/a":
+            return "No clear expectation is available yet because the underlying signals are incomplete."
+        return f"In plain terms: {text} Keep position size disciplined until this expectation is confirmed by price action."
+
     return {
-        "vwap_dip": str(vwap_dip.get("rest_of_day_assumption", "n/a")),
-        "performance": str(performance.get("rest_of_day_assumption", "n/a")),
-        "volatility": str(volatility.get("rest_of_day_assumption", "n/a")),
-        "volume": str(volume.get("rest_of_day_assumption", "n/a")),
-        "momentum": str(momentum.get("rest_of_day_assumption", "n/a")),
+        "vwap_dip": _expand(vwap_dip.get("rest_of_day_assumption", "n/a")),
+        "performance": _expand(performance.get("rest_of_day_assumption", "n/a")),
+        "volatility": _expand(volatility.get("rest_of_day_assumption", "n/a")),
+        "volume": _expand(volume.get("rest_of_day_assumption", "n/a")),
+        "momentum": _expand(momentum.get("rest_of_day_assumption", "n/a")),
     }
 
 
@@ -523,21 +529,101 @@ def _risk_engine(
     momentum: Dict[str, object],
     vwap_prob: Dict[str, object],
 ) -> Dict[str, object]:
+    def _pct(value: float) -> float:
+        return round(max(5.0, min(95.0, value)), 1)
+
     atr_like = float(volatility.get("atr_like", 1.0) or 1.0)
     side = "Long" if direction == "Bullish" else "Short" if direction == "Bearish" else "Wait"
+    mom_up = float(momentum.get("prob_up", 50.0) or 50.0)
+    mom_down = float(momentum.get("prob_down", 50.0) or 50.0)
+    mom_conf = float(momentum.get("confidence", 0.0) or 0.0)
+    rvol = float(volume.get("rvol", 0.0) or 0.0)
+    participation = float(volume.get("participation_score", 50.0) or 50.0)
+    exp_prob = float(vwap_prob.get("expansion_prob", 50.0) or 50.0)
+    mean_prob = float(vwap_prob.get("mean_reversion_prob", 50.0) or 50.0)
+
+    directional_prob = mom_up if side == "Long" else mom_down if side == "Short" else max(mom_up, mom_down)
+    momentum_align_conf = _pct(directional_prob * 0.7 + mom_conf * 0.6)
+    volume_align_conf = _pct(30.0 + (rvol * 35.0) + (participation - 50.0) * 0.4)
+    vwap_edge = exp_prob - mean_prob
+    vwap_align_conf = _pct(45.0 + abs(vwap_edge) * 1.1) if side == "Wait" else _pct(
+        50.0 + vwap_edge * 0.9 + (directional_prob - 50.0) * 0.3
+    )
+
+    def _probability_label(pct: float) -> str:
+        if pct >= 75.0:
+            return "Highly probable (Good)"
+        if pct >= 60.0:
+            return "Probable (Good)"
+        if pct >= 45.0:
+            return "Moderately probable"
+        if pct >= 30.0:
+            return "Unlikely (Bad)"
+        return "Highly unlikely (Bad)"
+
+    direction_word = "upside" if side == "Long" else "downside" if side == "Short" else "either direction"
+    momentum_threshold = 57.0 if side in {"Long", "Short"} else 55.0
+    spread_target = 8.0
+    strengthening_alignments = [
+        (
+            f"Momentum alignment: we want directional probability above {momentum_threshold:.0f}% with at least "
+            f"a {spread_target:.0f}% spread versus the opposite side, and confidence above 30. "
+            f"Current state is up {mom_up:.1f}% vs down {mom_down:.1f}% with confidence {mom_conf:.1f}. "
+            f"Chance of this improving soon: {momentum_align_conf:.1f}% ({_probability_label(momentum_align_conf)})."
+        ),
+        (
+            f"Participation alignment: we want RVOL >= 1.10 and participation score >= 58 so follow-through is less likely to stall. "
+            f"Current state is RVOL {rvol:.2f} and participation {participation:.1f}/100. "
+            f"Chance of this strengthening: {volume_align_conf:.1f}% ({_probability_label(volume_align_conf)})."
+        ),
+        (
+            f"VWAP scenario alignment: we want expansion probability to separate from reversion by at least 8 points in the intended direction. "
+            f"Current state is expansion {exp_prob:.1f}% vs reversion {mean_prob:.1f}% (spread {vwap_edge:.1f}). "
+            f"Chance of cleaner VWAP alignment: {vwap_align_conf:.1f}% ({_probability_label(vwap_align_conf)})."
+        ),
+    ]
+
     if side == "Wait":
+        directional_hint = "Bullish" if mom_up > mom_down + 3.0 else "Bearish" if mom_down > mom_up + 3.0 else "Neutral"
+        confirmations = [
+            "Wait for a directional trigger (OR break/retest, reclaim, or rejection setup) before sizing.",
+            (
+                f"Wait for momentum separation to widen (now up {mom_up:.1f}% vs down {mom_down:.1f}%, hint: {directional_hint})."
+            ),
+            (
+                f"Wait for participation to improve (RVOL now {rvol:.2f}; preferred >= 1.00)."
+                if rvol < 1.0
+                else f"Participation is acceptable (RVOL {rvol:.2f}); wait for price-structure confirmation."
+            ),
+            (
+                f"Wait for VWAP probabilities to tilt more clearly (expansion {exp_prob:.1f}% vs reversion {mean_prob:.1f}%)."
+            ),
+        ]
         return {
             "side": "Wait",
             "entry": round(last_price, 2),
             "stop": None,
             "target": None,
+            "suggested_target": None,
+            "minimum_target": None,
+            "maximum_target": None,
             "risk_points": None,
             "reward_points": None,
             "rr": None,
             "size_contracts_10k": 0,
             "quality_score": 35.0,
             "status": "Caution",
-            "notes": "No directional bias; hold until direction and trigger align.",
+            "notes": "No executable setup yet. Risk engine is waiting for confirmation before publishing stop/target.",
+            "alignment_factors": [
+                f"Momentum split is not decisive enough yet (up {mom_up:.1f}% vs down {mom_down:.1f}%).",
+                f"RVOL is {rvol:.2f}, so participation is not strong enough for confident sizing.",
+                f"VWAP tilt is mixed (expansion {exp_prob:.1f}% vs reversion {mean_prob:.1f}%).",
+            ],
+            "trade_summary": "No trade is suggested yet because direction and confirmation quality are not aligned.",
+            "expected_behavior": "Expect additional back-and-forth until one side clearly holds structure and VWAP context.",
+            "post_trade_assumption": "After confirmation appears, the engine will publish stop and target levels with RR >= 0.90.",
+            "strengthening_alignments": strengthening_alignments,
+            "waiting_for_confirmations": confirmations,
         }
 
     ref = reference_rows[0] if reference_rows else None
@@ -550,21 +636,77 @@ def _risk_engine(
 
     stop = (zone_low - 0.25 * atr_like) if side == "Long" else (zone_high + 0.25 * atr_like)
 
-    target = None
+    candidate_targets: List[float] = []
     for t in target_ladder:
         px = float(t.get("Price", last_price))
         if side == "Long" and px > last_price:
-            target = px
-            break
+            candidate_targets.append(px)
         if side == "Short" and px < last_price:
-            target = px
-            break
-    if target is None:
-        target = last_price + (1.8 * atr_like if side == "Long" else -1.8 * atr_like)
+            candidate_targets.append(px)
+
+    if not candidate_targets:
+        fallback_min = last_price + (1.0 * atr_like if side == "Long" else -1.0 * atr_like)
+        fallback_max = last_price + (2.4 * atr_like if side == "Long" else -2.4 * atr_like)
+        candidate_targets = [fallback_min, fallback_max]
+
+    if side == "Long":
+        candidate_targets = sorted(set(candidate_targets))
+    else:
+        candidate_targets = sorted(set(candidate_targets), reverse=True)
+
+    suggested_target = candidate_targets[0]
+    minimum_target = min(candidate_targets)
+    maximum_target = max(candidate_targets)
+    target = suggested_target
 
     risk_points = max(abs(last_price - stop), 0.25)
     reward_points = max(abs(target - last_price), 0.0)
     rr = reward_points / risk_points if risk_points > 0 else 0.0
+
+    # Enforce hard RR floor: do not suggest a trade if best available target is < 0.90R.
+    if rr < 0.9:
+        rr_candidates = []
+        for px in candidate_targets:
+            rew = abs(px - last_price)
+            rr_candidates.append((px, rew / risk_points if risk_points > 0 else 0.0))
+        valid_rr = [pair for pair in rr_candidates if pair[1] >= 0.9]
+        if valid_rr:
+            target = valid_rr[0][0]
+            reward_points = abs(target - last_price)
+            rr = reward_points / risk_points if risk_points > 0 else 0.0
+            suggested_target = target
+        else:
+            confirmations = [
+                f"Current stop distance is {risk_points:.2f} points, but available target path does not yet provide 0.90R.",
+                "Wait for either a tighter invalidation level (smaller stop) or a cleaner expansion target.",
+                "Require fresh trigger confirmation before accepting a lower-quality payoff profile.",
+            ]
+            return {
+                "side": "Wait",
+                "entry": round(last_price, 2),
+                "stop": None,
+                "target": None,
+                "suggested_target": round(suggested_target, 2),
+                "minimum_target": round(minimum_target, 2),
+                "maximum_target": round(maximum_target, 2),
+                "risk_points": round(risk_points, 2),
+                "reward_points": round(reward_points, 2),
+                "rr": round(rr, 2),
+                "size_contracts_10k": 0,
+                "quality_score": 42.0,
+                "status": "Caution",
+                "notes": "Trade blocked: expected reward is below 0.90R, so the setup is not worth taking yet.",
+                "alignment_factors": [
+                    f"Directional bias is {direction}, but reward path is too short for current stop distance.",
+                    f"Momentum confidence is {mom_conf:.1f} and participation score is {participation:.1f}/100.",
+                    f"VWAP context is expansion {exp_prob:.1f}% vs reversion {mean_prob:.1f}%.",
+                ],
+                "trade_summary": "The setup has directional context, but the payoff profile is currently unfavorable.",
+                "expected_behavior": "Unless range expands or stop can be tightened, price may not provide enough reward relative to risk.",
+                "post_trade_assumption": "If a larger directional move opens up, the engine will reactivate this setup once RR reaches at least 0.90.",
+                "strengthening_alignments": strengthening_alignments,
+                "waiting_for_confirmations": confirmations,
+            }
 
     # NQ-like point value for sizing guidance.
     point_value = 20.0
@@ -573,15 +715,13 @@ def _risk_engine(
 
     quality = 45.0
     quality += max(-10.0, min(15.0, (rr - 1.2) * 18.0))
-    quality += (float(volume.get("participation_score", 50.0)) - 50.0) * 0.20
-    quality += (float(momentum.get("confidence", 0.0)) - 20.0) * 0.10
+    quality += (participation - 50.0) * 0.20
+    quality += (mom_conf - 20.0) * 0.10
     if direction == "Bullish":
-        quality += (float(momentum.get("prob_up", 50.0)) - 50.0) * 0.15
+        quality += (mom_up - 50.0) * 0.15
     else:
-        quality += (float(momentum.get("prob_down", 50.0)) - 50.0) * 0.15
+        quality += (mom_down - 50.0) * 0.15
 
-    exp_prob = float(vwap_prob.get("expansion_prob", 50.0))
-    mean_prob = float(vwap_prob.get("mean_reversion_prob", 50.0))
     quality += (exp_prob - mean_prob) * 0.10
 
     quality = max(0.0, min(100.0, quality))
@@ -594,11 +734,31 @@ def _risk_engine(
         else "Risk quality is weak; wait for better alignment."
     )
 
+    alignment_factors = [
+        f"Direction and momentum alignment: side {side}, up {mom_up:.1f}% vs down {mom_down:.1f}%, confidence {mom_conf:.1f}.",
+        f"Participation context: RVOL {rvol:.2f}, participation score {participation:.1f}/100.",
+        f"VWAP scenario tilt: expansion {exp_prob:.1f}% vs reversion {mean_prob:.1f}%.",
+        f"Payoff profile: risk {risk_points:.2f} pts vs reward {reward_points:.2f} pts (R:R {rr:.2f}).",
+    ]
+
+    trade_summary = (
+        f"Risk engine suggests a {side.lower()} setup because directional signals and payoff are aligned at {rr:.2f}R."
+    )
+    expected_behavior = (
+        "If this setup is valid, price should hold away from the stop zone and progress toward the suggested target in staged pushes."
+    )
+    post_trade_assumption = (
+        "After entry, assume continuation remains valid only while trigger-side structure is respected; violation of that structure invalidates the idea."
+    )
+
     return {
         "side": side,
         "entry": round(last_price, 2),
         "stop": round(stop, 2),
         "target": round(target, 2),
+        "suggested_target": round(suggested_target, 2),
+        "minimum_target": round(minimum_target, 2),
+        "maximum_target": round(maximum_target, 2),
         "risk_points": round(risk_points, 2),
         "reward_points": round(reward_points, 2),
         "rr": round(rr, 2),
@@ -606,6 +766,12 @@ def _risk_engine(
         "quality_score": round(quality, 1),
         "status": status,
         "notes": notes,
+        "alignment_factors": alignment_factors,
+        "trade_summary": trade_summary,
+        "expected_behavior": expected_behavior,
+        "post_trade_assumption": post_trade_assumption,
+        "strengthening_alignments": strengthening_alignments,
+        "waiting_for_confirmations": [],
     }
 
 
@@ -818,10 +984,56 @@ def _to_ts(value: object) -> Optional[pd.Timestamp]:
     return pd.Timestamp(ts)
 
 
+def _session_marker_for_time(
+    ts: Optional[pd.Timestamp],
+    windows: Optional[Dict[str, Dict[str, dt.datetime]]],
+) -> Tuple[str, str]:
+    if ts is None or windows is None:
+        return ("⚪", "Unknown")
+
+    ts_val = pd.Timestamp(ts)
+    asia = windows.get("Asia", {})
+    london = windows.get("London", {})
+    us = windows.get("US", {})
+
+    asia_start = pd.to_datetime(asia.get("start")) if asia.get("start") else None
+    asia_end = pd.to_datetime(asia.get("end")) if asia.get("end") else None
+    london_start = pd.to_datetime(london.get("start")) if london.get("start") else None
+    london_end = pd.to_datetime(london.get("end")) if london.get("end") else None
+    us_start = pd.to_datetime(us.get("start")) if us.get("start") else None
+    us_end = pd.to_datetime(us.get("end")) if us.get("end") else None
+
+    power_hour_start = pd.Timestamp.combine(ts_val.date(), dt.time(14, 0))
+    power_hour_end = pd.Timestamp.combine(ts_val.date(), dt.time(16, 59, 59))
+
+    pre_asia_start = None
+    if asia_start is not None:
+        pre_asia_start = pd.Timestamp.combine(asia_start.date(), dt.time(18, 0))
+
+    # Priority order matters: power-hour should override generic NY tagging.
+    if power_hour_start <= ts_val <= power_hour_end:
+        return ("⚫", "Power Hour")
+    if pre_asia_start is not None and asia_start is not None and pre_asia_start <= ts_val < asia_start:
+        return ("🔴", "Pre Asia")
+    if asia_end is not None and london_start is not None and asia_end <= ts_val < london_start:
+        return ("⚪", "Pre London")
+    if london_end is not None and us_start is not None and london_end <= ts_val < us_start:
+        return ("🟤", "Pre NY")
+
+    if asia_start is not None and asia_end is not None and asia_start <= ts_val <= asia_end:
+        return ("🟡", "Asia")
+    if london_start is not None and london_end is not None and london_start <= ts_val <= london_end:
+        return ("🟣", "London")
+    if us_start is not None and us_end is not None and us_start <= ts_val <= us_end:
+        return ("🔵", "NY")
+    return ("⚪", "Off Session")
+
+
 def _evaluate_entry_executions(
     df: pd.DataFrame,
     entry_styles: List[Dict[str, object]],
     risk_engine: Dict[str, object],
+    windows: Optional[Dict[str, Dict[str, dt.datetime]]] = None,
 ) -> List[Dict[str, object]]:
     if df is None or df.empty:
         return []
@@ -829,21 +1041,61 @@ def _evaluate_entry_executions(
     work = df.copy().sort_values("timestamp").reset_index(drop=True)
     work["timestamp"] = pd.to_datetime(work["timestamp"])
     atr_like = _rolling_atr_like(work, length=20) or 2.0
+    trade_date = pd.to_datetime(work["timestamp"].iloc[-1]).date()
+    use_windows = windows or get_session_windows_for_date(trade_date)
+    us_end = use_windows.get("US", {}).get("end") if use_windows else None
+    trading_day_ended = bool(us_end is not None and pd.to_datetime(work["timestamp"].max()) >= pd.to_datetime(us_end))
+
     results: List[Dict[str, object]] = []
 
     for row in entry_styles:
         confluence = str(row.get("Confluence", "n/a"))
         action = str(row.get("Action", "Wait"))
         suggested = str(row.get("Suggested Entry", "First Tap"))
+        suggested_key = suggested.lower()
+        preview_use_mid = "midline" in suggested_key or "split" in suggested_key
+        preview_entry_price = (
+            float(row.get("Midline Price", 0.0)) if preview_use_mid else float(row.get("First Tap Price", 0.0))
+        )
+        suggested_ts = (
+            _to_ts(row.get("Suggested Time"))
+            or _to_ts(row.get("Reaction Time"))
+            or _to_ts(row.get("Tap Time"))
+            or _to_ts(row.get("Midline Time"))
+            or _to_ts(row.get("Formed Time"))
+        )
+        session_marker, suggested_session = _session_marker_for_time(suggested_ts, use_windows)
+        suggested_time_str = _fmt_ts(suggested_ts) or "n/a"
+        confluence_range = str(row.get("Confluence Range", "n/a"))
+        formed_time = str(row.get("Formed Time", "n/a"))
+        min_target = row.get("Min Target", row.get("Minimum Target Price", "n/a"))
+        max_target = row.get("Max Target", row.get("Maximum Target Price", "n/a"))
+        meta = {
+            "Session Marker": f"{session_marker} {suggested_session}",
+            "Suggested Time": suggested_time_str,
+            "Entry ETA (HH:MM)": row.get("Entry ETA (HH:MM)", "n/a"),
+            "Entry Window": row.get("Entry Window", "n/a"),
+            "Entry ETA Detail": row.get("Entry ETA Detail", "n/a"),
+            "Confluence Range": confluence_range,
+            "Confluence Formed Time": formed_time,
+            "Entry Confidence": row.get("Entry Confidence", "n/a"),
+            "Confidence Tier": row.get("Confidence Tier", "n/a"),
+            "Confidence Reasoning": row.get("Confidence Reasoning", row.get("Reason", "n/a")),
+            "Min Target": min_target,
+            "Max Target": max_target,
+        }
 
         if action not in {"Long", "Short"}:
             results.append(
                 {
+                    **meta,
                     "Confluence": confluence,
                     "Action": action,
                     "Suggested Entry": suggested,
-                    "Entry Price": "n/a",
+                    "Entry Price": round(preview_entry_price, 2) if preview_entry_price > 0 else "n/a",
                     "Risk Pts(Ticks)": "n/a",
+                    "Target Pts(Ticks)": "n/a",
+                    "RR": "n/a",
                     "Risk $ (1 contract)": "n/a",
                     "Executed": "No",
                     "Execution Time": "n/a",
@@ -877,21 +1129,34 @@ def _evaluate_entry_executions(
         if exec_time is None:
             pending_risk_points = max(0.25, abs(entry_price - stop))
             pending_ticks = int(round(pending_risk_points / 0.25))
+            pending_target_points = max(0.0, abs(tgt - entry_price))
+            pending_target_ticks = int(round(pending_target_points / 0.25))
             pending_risk_dollars = pending_risk_points * 20.0
+            pending_outcome = "Unfilled" if trading_day_ended else "Pending"
+            pending_why = (
+                "Entry level was not touched before the trading day ended."
+                if trading_day_ended
+                else "Entry level has not been touched yet."
+            )
             results.append(
                 {
+                    **meta,
                     "Confluence": confluence,
                     "Action": action,
                     "Suggested Entry": suggested,
                     "Entry Price": round(entry_price, 2),
+                    "Risk (Ticks)": pending_ticks,
+                    "Target (Ticks)": pending_target_ticks,
                     "Risk Pts(Ticks)": f"{pending_risk_points:.2f} ({pending_ticks})",
+                    "Target Pts(Ticks)": f"{pending_target_points:.2f} ({pending_target_ticks})",
+                    "RR": round((pending_target_points / pending_risk_points) if pending_risk_points > 0 else 0.0, 2),
                     "Risk $ (1 contract)": round(pending_risk_dollars, 2),
                     "Executed": "No",
                     "Execution Time": "n/a",
-                    "Outcome": "Pending",
+                    "Outcome": pending_outcome,
                     "Exit Time": "n/a",
                     "Exit Price": "n/a",
-                    "Why": "Entry level has not been touched yet.",
+                    "Why": pending_why,
                 }
             )
             continue
@@ -900,14 +1165,21 @@ def _evaluate_entry_executions(
         if future.empty:
             open_risk_points = max(0.25, abs(entry_price - stop))
             open_ticks = int(round(open_risk_points / 0.25))
+            open_target_points = max(0.0, abs(tgt - entry_price))
+            open_target_ticks = int(round(open_target_points / 0.25))
             open_risk_dollars = open_risk_points * 20.0
             results.append(
                 {
+                    **meta,
                     "Confluence": confluence,
                     "Action": action,
                     "Suggested Entry": suggested,
                     "Entry Price": round(entry_price, 2),
+                    "Risk (Ticks)": open_ticks,
+                    "Target (Ticks)": open_target_ticks,
                     "Risk Pts(Ticks)": f"{open_risk_points:.2f} ({open_ticks})",
+                    "Target Pts(Ticks)": f"{open_target_points:.2f} ({open_target_ticks})",
+                    "RR": round((open_target_points / open_risk_points) if open_risk_points > 0 else 0.0, 2),
                     "Risk $ (1 contract)": round(open_risk_dollars, 2),
                     "Executed": "Yes",
                     "Execution Time": _fmt_ts(exec_time),
@@ -957,14 +1229,21 @@ def _evaluate_entry_executions(
 
         final_risk_points = max(0.25, abs(entry_price - stop))
         final_ticks = int(round(final_risk_points / 0.25))
+        final_target_points = max(0.0, abs(tgt - entry_price))
+        final_target_ticks = int(round(final_target_points / 0.25))
         results.append(
             {
+                **meta,
                 "Confluence": confluence,
                 "Action": action,
                 "Suggested Entry": suggested,
                 "Entry Price": round(entry_price, 2),
-            "Risk Pts(Ticks)": f"{final_risk_points:.2f} ({final_ticks})",
-            "Risk $ (1 contract)": round(final_risk_points * 20.0, 2),
+            "Risk (Ticks)": final_ticks,
+            "Target (Ticks)": final_target_ticks,
+                "Risk Pts(Ticks)": f"{final_risk_points:.2f} ({final_ticks})",
+            "Target Pts(Ticks)": f"{final_target_points:.2f} ({final_target_ticks})",
+                "RR": round((final_target_points / final_risk_points) if final_risk_points > 0 else 0.0, 2),
+                "Risk $ (1 contract)": round(final_risk_points * 20.0, 2),
                 "Executed": "Yes",
                 "Execution Time": _fmt_ts(exec_time) or "n/a",
                 "Outcome": outcome,
@@ -974,7 +1253,11 @@ def _evaluate_entry_executions(
             }
         )
 
-    return results
+    return sorted(
+        results,
+        key=lambda r: (_to_ts(r.get("Suggested Time")) or pd.Timestamp.min),
+        reverse=True,
+    )
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
@@ -1747,6 +2030,50 @@ def _entry_style_target_prices(
     return preferred, minimum, maximum
 
 
+def _estimate_entry_eta(
+    action: str,
+    style: str,
+    suggested_ts: Optional[pd.Timestamp],
+    tap_time: Optional[str],
+    midline_time: Optional[str],
+    bar_minutes: int,
+) -> Tuple[str, str, str]:
+    if action not in {"Long", "Short"}:
+        return ("n/a", "n/a", "Waiting for confirmation before entry timing can be estimated.")
+
+    tap_ts = _to_ts(tap_time)
+    mid_ts = _to_ts(midline_time)
+    style_l = str(style or "").lower()
+
+    if "midline" in style_l and mid_ts is not None:
+        hhmm = mid_ts.strftime("%H:%M")
+        return (hhmm, "0-1 min", f"Midline was already touched around {hhmm} ET.")
+    if "first tap" in style_l and tap_ts is not None:
+        hhmm = tap_ts.strftime("%H:%M")
+        return (hhmm, "0-1 min", f"First-tap level was already touched around {hhmm} ET.")
+
+    if suggested_ts is None:
+        return ("n/a", "n/a", "No valid timestamp anchor is available yet to project an entry ETA.")
+
+    bm = max(1, int(bar_minutes))
+    if "split" in style_l:
+        start = suggested_ts + pd.Timedelta(minutes=max(1 * bm, 3))
+        end = suggested_ts + pd.Timedelta(minutes=max(3 * bm, 15))
+    elif "midline" in style_l:
+        start = suggested_ts + pd.Timedelta(minutes=max(2 * bm, 5))
+        end = suggested_ts + pd.Timedelta(minutes=max(4 * bm, 15))
+    else:
+        start = suggested_ts + pd.Timedelta(minutes=max(1 * bm, 2))
+        end = suggested_ts + pd.Timedelta(minutes=max(3 * bm, 10))
+
+    eta_hhmm = start.strftime("%H:%M")
+    min_from = max(1, int((start - suggested_ts).total_seconds() // 60))
+    min_to = max(1, int((end - suggested_ts).total_seconds() // 60))
+    window_label = f"{min_from}-{min_to} min"
+    detail = f"Expect entry around {eta_hhmm} ET, typically within {window_label} after the signal anchor."
+    return (eta_hhmm, window_label, detail)
+
+
 def _analyze_zone_reaction_candles(
     df: pd.DataFrame,
     zone_low: float,
@@ -1863,8 +2190,10 @@ def _suggest_confluence_entry_styles(
     target_ladder: List[Dict[str, object]],
     mode: str,
     whipsaw_risk: bool,
+    windows: Optional[Dict[str, Dict[str, dt.datetime]]] = None,
 ) -> List[Dict[str, object]]:
     suggestions: List[Dict[str, object]] = []
+    bar_minutes = _infer_bar_minutes(df, default_minutes=5)
     preferred_tgt, min_tgt, max_tgt = _entry_style_target_prices(target_ladder)
     for row in reference_rows:
         name = str(row.get("Confluence", "n/a"))
@@ -1905,6 +2234,15 @@ def _suggest_confluence_entry_styles(
         reaction_score = float(reaction.get("score", 0.0) or 0.0)
         reaction_reason = str(reaction.get("reason", "n/a"))
         reaction_time = str(reaction.get("event_time", "n/a"))
+        suggested_ts = (
+            _to_ts(reaction_time)
+            or _to_ts(tap_time)
+            or _to_ts(midline_time)
+            or _to_ts(formed_time)
+        )
+        session_marker, suggested_session = _session_marker_for_time(suggested_ts, windows)
+        suggested_time_str = _fmt_ts(suggested_ts) or "n/a"
+        confluence_range = f"{low:.2f}-{high:.2f}"
 
         if zone_kind == "FVG":
             style = "Midline"
@@ -1956,8 +2294,50 @@ def _suggest_confluence_entry_styles(
         if status in {"Retested", "Tested"} and reaction_score < 70.0:
             entry_timing = "Zone already tested; wait for fresh confirmation candle."
 
+        entry_style_key = style.lower()
+        entry_price_for_metrics = mid if ("midline" in entry_style_key or "split" in entry_style_key) else (
+            low if side == "Bullish" else high
+        )
+        risk_points_style = max(0.25, abs(entry_price_for_metrics - (low if side == "Bullish" else high)))
+        target_price_style = preferred_tgt
+        if target_price_style is None:
+            if side == "Bullish":
+                target_price_style = max_tgt if max_tgt is not None else entry_price_for_metrics + max(width, 0.5)
+            elif side == "Bearish":
+                target_price_style = min_tgt if min_tgt is not None else entry_price_for_metrics - max(width, 0.5)
+            else:
+                target_price_style = entry_price_for_metrics
+        target_points_style = max(0.0, abs(float(target_price_style) - entry_price_for_metrics))
+        risk_ticks_style = int(round(risk_points_style / 0.25))
+        target_ticks_style = int(round(target_points_style / 0.25))
+        rr_style = (target_points_style / risk_points_style) if risk_points_style > 0 else 0.0
+
+        if action in {"Long", "Short"} and rr_style < 0.9:
+            action = "Wait"
+            style = "Wait"
+            reason = (
+                f"Setup blocked because projected RR is {rr_style:.2f}, below the minimum required 0.90. "
+                "Wait for either tighter risk or wider target extension."
+            )
+            entry_timing = "Do not execute until projected RR improves to at least 0.90."
+
+        eta_hhmm, eta_window, eta_detail = _estimate_entry_eta(
+            action=action,
+            style=style,
+            suggested_ts=suggested_ts,
+            tap_time=tap_time,
+            midline_time=midline_time,
+            bar_minutes=bar_minutes,
+        )
+
         suggestions.append(
             {
+                "Session Marker": f"{session_marker} {suggested_session}",
+                "Suggested Time": suggested_time_str,
+                "Entry ETA (HH:MM)": eta_hhmm,
+                "Entry Window": eta_window,
+                "Entry ETA Detail": eta_detail,
+                "Confluence Range": confluence_range,
                 "Confluence": name,
                 "Side": side,
                 "Action": action,
@@ -1967,6 +2347,12 @@ def _suggest_confluence_entry_styles(
                 "Suggested Entry": style,
                 "First Tap Price": round(low if "bullish" in name_l else high, 2),
                 "Midline Price": round(mid, 2),
+                "Entry Price": round(entry_price_for_metrics, 2),
+                "Risk (Ticks)": risk_ticks_style,
+                "Target (Ticks)": target_ticks_style,
+                "Risk Pts(Ticks)": f"{risk_points_style:.2f} ({risk_ticks_style})",
+                "Target Pts(Ticks)": f"{target_points_style:.2f} ({target_ticks_style})",
+                "RR": round(rr_style, 2),
                 "Tap Hit": "Yes" if tap_hit else "No",
                 "Tap Time": tap_time or "n/a",
                 "Midline Hit": "Yes" if midline_hit else "No",
@@ -1980,13 +2366,19 @@ def _suggest_confluence_entry_styles(
                 "Preferred Target Price": round(preferred_tgt, 2) if preferred_tgt is not None else None,
                 "Minimum Target Price": round(min_tgt, 2) if min_tgt is not None else None,
                 "Maximum Target Price": round(max_tgt, 2) if max_tgt is not None else None,
+                "Min Target": round(min_tgt, 2) if min_tgt is not None else "n/a",
+                "Max Target": round(max_tgt, 2) if max_tgt is not None else "n/a",
                 "Expected Retests": expected_retests,
                 "Entry Timing": entry_timing,
                 "Entry Style Reason": reason,
                 "Reason": reason,
             }
         )
-    return suggestions
+    return sorted(
+        suggestions,
+        key=lambda r: (_to_ts(r.get("Suggested Time")) or pd.Timestamp.min),
+        reverse=True,
+    )
 
 
 def _estimate_daily_entry_capacity(
@@ -2607,13 +2999,19 @@ def build_strategy_playbook(
         ]
 
     reference_rows = _select_reference_confluence_rows(confluences, ny_direction, max_items=2)
+    tracker_reference_rows = _select_reference_confluence_rows(
+        confluences,
+        ny_direction,
+        max_items=max(1, len(confluences)),
+    )
     reference_confluences = _select_reference_confluences(confluences, ny_direction, max_items=2)
     entry_style_suggestions = _suggest_confluence_entry_styles(
-        reference_rows,
+        tracker_reference_rows,
         df=df,
         target_ladder=target_ladder,
         mode=ny_mode,
         whipsaw_risk=whipsaw_risk,
+        windows=windows,
     )
     entry_blueprints = _entry_blueprints(
         ny_mode,
@@ -2658,6 +3056,7 @@ def build_strategy_playbook(
         df=df,
         entry_styles=entry_style_suggestions,
         risk_engine=risk_engine,
+        windows=windows,
     )
 
     # Confidence blend: retain existing logic but adjust using confluence analytics.

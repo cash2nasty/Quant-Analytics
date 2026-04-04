@@ -126,7 +126,7 @@ def _detect_last_bos(
 def _trend_label_15m(df: pd.DataFrame, length: int = 10) -> str:
     if df is None or df.empty:
         return "n/a"
-    rs = resample_ohlcv(df, "15T")
+    rs = resample_ohlcv(df, "15min")
     if len(rs) < length:
         return "n/a"
     slope = float(trend_strength(rs["close"], length=length))

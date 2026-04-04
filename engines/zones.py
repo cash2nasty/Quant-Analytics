@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 from typing import List, Optional
 
 import pandas as pd
@@ -32,8 +33,32 @@ def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     data = df.copy()
     if "timestamp" not in data.columns:
         return pd.DataFrame()
-    if isinstance(rule, str):
-        rule = rule.lower()
+    if not isinstance(rule, str) or not rule.strip():
+        return pd.DataFrame()
+
+    rule = rule.strip()
+    # Normalize legacy aliases (e.g., 15T -> 15min) for pandas compatibility.
+    m = re.match(r"^(\d*)\s*([A-Za-z]+)$", rule)
+    if m:
+        qty, unit = m.groups()
+        alias = {
+            "T": "min",
+            "t": "min",
+            "MIN": "min",
+            "min": "min",
+            "H": "h",
+            "h": "h",
+            "S": "s",
+            "s": "s",
+            "L": "ms",
+            "ms": "ms",
+            "U": "us",
+            "us": "us",
+            "N": "ns",
+            "ns": "ns",
+        }.get(unit, unit)
+        rule = f"{qty or '1'}{alias}"
+
     data["timestamp"] = pd.to_datetime(data["timestamp"])
     data = data.sort_values("timestamp").set_index("timestamp")
     ohlc = data.resample(rule).agg(
