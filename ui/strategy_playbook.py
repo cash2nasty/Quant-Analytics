@@ -103,6 +103,141 @@ def _fmt_price(value: object) -> str:
         return "n/a"
 
 
+def _to_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _trade_row_key(row: Dict[str, Any]) -> str:
+    return "|".join(
+        [
+            str(row.get("Confluence", "n/a")),
+            str(row.get("Suggested Time", "n/a")),
+            str(row.get("Action", "Wait")),
+            str(row.get("Suggested Entry", "n/a")),
+        ]
+    )
+
+
+def _build_top_unfilled_trade_picks(
+    playbook: Dict[str, Any],
+    asof_ts: pd.Timestamp | None = None,
+    suggested_at_app_time: str | None = None,
+) -> Dict[str, Any]:
+    execution_rows = playbook.get("entry_execution_tracker", []) or []
+    confluences = playbook.get("confluences", []) or []
+
+    liquidity_by_name: Dict[str, float] = {}
+    for row in confluences:
+        name = str(row.get("Confluence", "n/a"))
+        liquidity_by_name[name] = max(
+            liquidity_by_name.get(name, 0.0),
+            _to_float(row.get("Liquidity Score", 0.0), 0.0),
+        )
+
+    candidates: List[Dict[str, Any]] = []
+    for row in execution_rows:
+        action = str(row.get("Action", "Wait"))
+        executed = str(row.get("Executed", "No"))
+        outcome = str(row.get("Outcome", "")).lower()
+        if action not in {"Long", "Short"}:
+            continue
+        if executed == "Yes":
+            continue
+        if outcome in {"skipped", "failed", "successful", "open"}:
+            continue
+
+        if asof_ts is not None:
+            suggested_time = pd.to_datetime(row.get("Suggested Time", ""), errors="coerce")
+            if pd.notna(suggested_time) and suggested_time > asof_ts:
+                continue
+
+        rr = _to_float(row.get("RR", 0.0), 0.0)
+        conf = _to_float(row.get("Entry Confidence", 0.0), 0.0)
+        liq = liquidity_by_name.get(str(row.get("Confluence", "n/a")), 0.0)
+        liq_score = max(0.0, min(100.0, liq * 35.0))
+
+        fill_conf = max(
+            5.0,
+            min(
+                95.0,
+                30.0 + conf * 0.50 + (rr - 0.90) * 18.0 + liq_score * 0.12,
+            ),
+        )
+        success_given_fill = max(
+            5.0,
+            min(
+                95.0,
+                24.0 + conf * 0.55 + (rr - 0.90) * 42.0 + liq_score * 0.10,
+            ),
+        )
+        success_conf = max(1.0, min(95.0, fill_conf * (success_given_fill / 100.0)))
+        fail_conf = max(1.0, min(95.0, fill_conf * ((100.0 - success_given_fill) / 100.0)))
+
+        rank_score = (
+            fill_conf * 0.42
+            + success_conf * 0.43
+            - fail_conf * 0.35
+            + conf * 0.20
+            + liq_score * 0.08
+        )
+
+        row_copy = dict(row)
+        row_copy["Success confidence"] = round(success_conf, 1)
+        row_copy["Fill confidence"] = round(fill_conf, 1)
+        row_copy["Fail confidence"] = round(fail_conf, 1)
+        row_copy["_liq_score"] = round(liq, 2)
+        row_copy["_rank_score"] = round(rank_score, 2)
+        row_copy["_trade_key"] = _trade_row_key(row_copy)
+        candidates.append(row_copy)
+
+    ranked = sorted(candidates, key=lambda r: (_to_float(r.get("_rank_score"), 0.0)), reverse=True)
+    top_two = ranked[:2]
+
+    best_key = ""
+    if top_two:
+        best = sorted(
+            top_two,
+            key=lambda r: (
+                -_to_float(r.get("Fill confidence"), 0.0),
+                _to_float(r.get("Fail confidence"), 100.0),
+                -_to_float(r.get("Success confidence"), 0.0),
+                -_to_float(r.get("_rank_score"), 0.0),
+            ),
+        )[0]
+        best_key = str(best.get("_trade_key", ""))
+
+    table_rows = []
+    for row in top_two:
+        table_rows.append(
+            {
+                "Confluence": row.get("Confluence", "n/a"),
+                "Confluence Range": row.get("Confluence Range", "n/a"),
+                "Suggested time": row.get("Suggested Time", "n/a"),
+                "Suggested at (App Time)": row.get("Suggested App Time", suggested_at_app_time or "n/a"),
+                "Action": row.get("Action", "Wait"),
+                "Suggested Entry": row.get("Suggested Entry", "n/a"),
+                "Entry Price": row.get("Entry Price", "n/a"),
+                "Risk Price(Ticks)": row.get("Risk Pts(Ticks)", "n/a"),
+                "Target Price(Ticks)": row.get("Target Pts(Ticks)", "n/a"),
+                "RR": row.get("RR", "n/a"),
+                "Success confidence": f"{_to_float(row.get('Success confidence', 0.0), 0.0):.1f}%",
+                "Fill confidence": f"{_to_float(row.get('Fill confidence', 0.0), 0.0):.1f}%",
+                "Fail confidence": f"{_to_float(row.get('Fail confidence', 0.0), 0.0):.1f}%",
+            }
+        )
+
+    return {
+        "rows": table_rows,
+        "detailed_rows": top_two,
+        "best_trade_key": best_key,
+        "active": True,
+        "status": "Top picks active.",
+    }
+
+
 def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
     decision = playbook.get("decision", {})
     primary_trigger = playbook.get("primary_trigger") or {}
@@ -243,6 +378,7 @@ MARKET_UPDATE_FILTERS = [
     "Trade Today Decision",
     "Trigger Detection",
     "Entry Playbook Updates",
+    "Top Trade Picks",
     "Power Hour Focus",
     "Important Updates",
 ]
@@ -276,6 +412,7 @@ def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
     entry_style_rows = playbook.get("confluence_entry_styles", []) or []
     power_hour = playbook.get("power_hour", {}) or {}
     confluence_rows = playbook.get("confluences", []) or []
+    top_trade_picks = playbook.get("top_trade_picks", {}) or {}
 
     confluence_map: Dict[str, Dict[str, Any]] = {}
     for row in confluence_rows:
@@ -383,6 +520,23 @@ def _snapshot_playbook(playbook: Dict[str, Any]) -> Dict[str, Any]:
             "focus": str(power_hour.get("focus", "No")),
             "bias": str(power_hour.get("bias", "Neutral")),
             "reason": str(power_hour.get("reason", "n/a")),
+        },
+        "top_trade_picks": {
+            "active": bool(top_trade_picks.get("active", False)),
+            "status": str(top_trade_picks.get("status", "")),
+            "best_trade_key": str(top_trade_picks.get("best_trade_key", "")),
+            "rows": [
+                {
+                    "Confluence": str(r.get("Confluence", "n/a")),
+                    "Suggested time": str(r.get("Suggested time", "n/a")),
+                    "Action": str(r.get("Action", "Wait")),
+                    "RR": str(r.get("RR", "n/a")),
+                    "Success confidence": str(r.get("Success confidence", "n/a")),
+                    "Fill confidence": str(r.get("Fill confidence", "n/a")),
+                    "Fail confidence": str(r.get("Fail confidence", "n/a")),
+                }
+                for r in (top_trade_picks.get("rows", []) or [])
+            ],
         },
         "confluences": confluence_map,
     }
@@ -661,6 +815,36 @@ def _build_update_events(prev_snapshot: Dict[str, Any], curr_snapshot: Dict[str,
         event["expect"] = "Use power-hour bias only if liquidity/trigger alignment confirms."
         events.append(event)
 
+    prev_top = prev_snapshot.get("top_trade_picks", {}) or {}
+    curr_top = curr_snapshot.get("top_trade_picks", {}) or {}
+    if bool(curr_top.get("active", False)) and prev_top != curr_top:
+        prev_rows = prev_top.get("rows", []) or []
+        curr_rows = curr_top.get("rows", []) or []
+        prev_best = str(prev_top.get("best_trade_key", ""))
+        curr_best = str(curr_top.get("best_trade_key", ""))
+
+        event = _event_base(
+            reported_at,
+            "top_trade_picks_change",
+            ["Top Trade Picks", "Important Updates"],
+            "Top Trade Picks",
+            "Top unfilled trade picks were refreshed.",
+        )
+        event["before"] = f"Count {len(prev_rows)} | best key {prev_best or 'n/a'}"
+        event["after"] = f"Count {len(curr_rows)} | best key {curr_best or 'n/a'}"
+        if curr_rows:
+            top = curr_rows[0]
+            event["why"] = (
+                f"Top pick now {top.get('Confluence', 'n/a')} ({top.get('Action', 'Wait')}) with "
+                f"fill {top.get('Fill confidence', 'n/a')}, success {top.get('Success confidence', 'n/a')}, "
+                f"fail {top.get('Fail confidence', 'n/a')}."
+            )
+            event["expect"] = "Risk Engine default trade focus will shift to the highest-ranked unfilled trade." 
+        else:
+            event["why"] = "No eligible unfilled directional trades are currently available."
+            event["expect"] = "Wait for a new unfilled directional setup to appear."
+        events.append(event)
+
     prev_confs = prev_snapshot.get("confluences", {})
     curr_confs = curr_snapshot.get("confluences", {})
 
@@ -852,6 +1036,25 @@ def _build_initial_events(curr_snapshot: Dict[str, Any], now_et: dt.datetime) ->
     event["expect"] = "Recheck focus as the session advances toward close."
     events.append(event)
 
+    top_trade_picks = curr_snapshot.get("top_trade_picks", {}) or {}
+    top_rows = top_trade_picks.get("rows", []) or []
+    if bool(top_trade_picks.get("active", False)) and top_rows:
+        first = top_rows[0]
+        event = _event_base(
+            reported_at,
+            "top_trade_picks_baseline",
+            ["Top Trade Picks", "Important Updates"],
+            "Top Trade Picks",
+            "Baseline top unfilled trade picks loaded.",
+        )
+        event["after"] = (
+            f"Top 1: {first.get('Confluence', 'n/a')} | {first.get('Action', 'Wait')} | "
+            f"fill {first.get('Fill confidence', 'n/a')}"
+        )
+        event["why"] = "Trades were ranked by fill/success/fail confidence, liquidity alignment, and confidence strength."
+        event["expect"] = "Risk Engine defaults to the highest-ranked unfilled trade while selection remains user-editable."
+        events.append(event)
+
     confluences = curr_snapshot.get("confluences", {})
     for _, conf in confluences.items():
         tags: List[str] = []
@@ -941,6 +1144,7 @@ def _render_market_updates_panel(events: List[Dict[str, Any]], panel_key: str = 
         "Trigger Detection",
         "Entry Playbook Updates",
         "Power Hour Focus",
+        "Top Trade Picks",
     }
     confluence_detail_filters = {"FVGs", "OB's", "BB's"}
 
@@ -1163,6 +1367,24 @@ def render_strategy_playbook() -> None:
         elif asof_ts is not None:
             st.info(f"Time-travel active: showing page state as of {asof_ts.strftime('%Y-%m-%d %H:%M')} ET.")
 
+    now_live = _now_et()
+    top_picks_active = False
+    top_picks_status = ""
+    if view_mode == "Time Travel":
+        if asof_ts is not None and asof_error is None:
+            top_picks_active = True
+            top_picks_status = f"Top picks active for Time Travel as-of {asof_ts.strftime('%Y-%m-%d %H:%M')} ET."
+        else:
+            top_picks_status = "Top picks are inactive until a valid Time Travel as-of time is set."
+    else:
+        if selected_date != today:
+            top_picks_status = "Top picks are inactive for ended historical trading days in Live mode."
+        elif td_start <= pd.Timestamp(now_live) <= td_end:
+            top_picks_active = True
+            top_picks_status = "Top picks active for the current live trading day."
+        else:
+            top_picks_status = "Top picks are inactive because the current trading-day window is not live."
+
     if not has_today and not has_prev:
         st.warning("No intraday data available for selected trading-day window (18:00 to 16:59 ET).")
         return
@@ -1185,7 +1407,7 @@ def render_strategy_playbook() -> None:
     patterns = detect_patterns(sessions, df_trading_day_view if has_today_view else None, df_prev_trading_day if has_prev else None)
     zones = build_htf_zones(session_source) if session_source is not None and not session_source.empty else []
 
-    run_now = asof_ts.to_pydatetime() if (view_mode == "Time Travel" and asof_ts is not None) else _now_et()
+    run_now = asof_ts.to_pydatetime() if (view_mode == "Time Travel" and asof_ts is not None) else now_live
 
     playbook = build_strategy_playbook(
         df_today=df_trading_day_view if has_today_view else session_source,
@@ -1195,7 +1417,25 @@ def render_strategy_playbook() -> None:
         zones=zones,
         now_et=run_now,
         whipsaw_threshold=float(whipsaw_threshold),
+        trading_day=selected_date,
     )
+    app_suggested_at = pd.Timestamp(run_now).strftime("%Y-%m-%d %H:%M")
+    if top_picks_active:
+        playbook["top_trade_picks"] = _build_top_unfilled_trade_picks(
+            playbook,
+            asof_ts=asof_ts,
+            suggested_at_app_time=app_suggested_at,
+        )
+        playbook["top_trade_picks"]["active"] = True
+        playbook["top_trade_picks"]["status"] = top_picks_status
+    else:
+        playbook["top_trade_picks"] = {
+            "rows": [],
+            "detailed_rows": [],
+            "best_trade_key": "",
+            "active": False,
+            "status": top_picks_status,
+        }
 
     market_events = _update_market_event_state(
         symbol=symbol,
@@ -1378,6 +1618,10 @@ def render_strategy_playbook() -> None:
     style_rows = playbook.get("confluence_entry_styles", []) or []
     if style_rows:
         style_df = pd.DataFrame(style_rows)
+        if "Suggested App Time" not in style_df.columns and "Suggested Time" in style_df.columns:
+            style_df["Suggested App Time"] = style_df["Suggested Time"]
+        elif "Suggested App Time" in style_df.columns and "Suggested Time" in style_df.columns:
+            style_df["Suggested App Time"] = style_df["Suggested App Time"].fillna(style_df["Suggested Time"])
         if "Suggested Time" in style_df.columns:
             style_df["_suggested_time_sort"] = pd.to_datetime(style_df["Suggested Time"], errors="coerce")
             style_df = style_df.sort_values("_suggested_time_sort", ascending=False, na_position="last")
@@ -1387,6 +1631,7 @@ def render_strategy_playbook() -> None:
             columns={
                 "Session Marker": "Session marker",
                 "Suggested Time": "Suggested time",
+                "Suggested App Time": "Suggested app time",
                 "Entry Confidence": "Entry confidence",
                 "Confidence Tier": "Confidence tier",
                 "Confidence Reasoning": "Confidence reasoning",
@@ -1394,19 +1639,22 @@ def render_strategy_playbook() -> None:
                 "Exit Time": "Exit time",
                 "Min Target": "Min Target",
                 "Max Target": "Max Target",
+                "Risk Pts(Ticks)": "Risk Price(Ticks)",
+                "Target Pts(Ticks)": "Target Price(Ticks)",
             }
         )
         ordered = [
             "Session marker",
             "Suggested time",
+            "Suggested app time",
             "Entry ETA (HH:MM)",
             "Entry Window",
             "Action",
             "Confluence",
             "Suggested Entry",
             "Entry Price",
-            "Risk Pts(Ticks)",
-            "Target Pts(Ticks)",
+            "Risk Price(Ticks)",
+            "Target Price(Ticks)",
             "RR",
             "Entry confidence",
             "Confidence tier",
@@ -1418,33 +1666,57 @@ def render_strategy_playbook() -> None:
             if c not in style_df.columns:
                 style_df[c] = "n/a"
         st.dataframe(style_df[ordered], use_container_width=True)
-        st.markdown("**Confluence Entry Timing Summary**")
-        for row in style_rows_sorted[:3]:
-            st.write(
-                "- "
-                f"{row.get('Confluence', 'n/a')} | {row.get('Action', 'Wait')} | "
-                f"confidence {row.get('Entry Confidence', 'n/a')} ({row.get('Confidence Tier', 'n/a')}) | "
-                f"Suggested: {row.get('Suggested Time', 'n/a')} | "
-                f"Expect entry at: {row.get('Entry ETA (HH:MM)', 'n/a')} ({row.get('Entry Window', 'n/a')}) | "
-                f"Confluence formed: {row.get('Formed Time', 'n/a')} | "
-                f"Confluence range: {row.get('Confluence Range', 'n/a')} | "
-                f"Expected retests: {row.get('Expected Retests', 'n/a')} | "
-                f"Entry timing: {row.get('Entry Timing', 'n/a')}"
-            )
+        timing_key = f"show_confluence_timing::{symbol}::{selected_date.isoformat()}"
+        if timing_key not in st.session_state:
+            st.session_state[timing_key] = False
+        timing_btn_label = (
+            "Hide Confluence Entry Timing Summary"
+            if bool(st.session_state[timing_key])
+            else "Show Confluence Entry Timing Summary"
+        )
+        if st.button(timing_btn_label, key=f"{timing_key}::btn"):
+            st.session_state[timing_key] = not bool(st.session_state[timing_key])
 
-        st.markdown("**Entry Confidence And Reasoning**")
-        for row in style_rows_sorted[:5]:
-            st.write(
-                "- "
-                f"{row.get('Confluence', 'n/a')} -> "
-                f"{row.get('Entry Confidence', 'n/a')}/100 ({row.get('Confidence Tier', 'n/a')}) | "
-                f"Suggested: {row.get('Suggested Time', 'n/a')} | "
-                f"ETA: {row.get('Entry ETA (HH:MM)', 'n/a')} ({row.get('Entry Window', 'n/a')}) | "
-                f"Formed: {row.get('Formed Time', 'n/a')} | "
-                f"Range: {row.get('Confluence Range', 'n/a')}"
-            )
-            st.caption(str(row.get("Confidence Reasoning", "n/a")))
-            st.caption(str(row.get("Entry ETA Detail", "n/a")))
+        if bool(st.session_state[timing_key]):
+            st.markdown("**Confluence Entry Timing Summary**")
+            for row in style_rows_sorted[:3]:
+                st.write(
+                    "- "
+                    f"{row.get('Confluence', 'n/a')} | {row.get('Action', 'Wait')} | "
+                    f"confidence {row.get('Entry Confidence', 'n/a')} ({row.get('Confidence Tier', 'n/a')}) | "
+                    f"Suggested: {row.get('Suggested Time', 'n/a')} | "
+                    f"Expect entry at: {row.get('Entry ETA (HH:MM)', 'n/a')} ({row.get('Entry Window', 'n/a')}) | "
+                    f"Confluence formed: {row.get('Formed Time', 'n/a')} | "
+                    f"Confluence range: {row.get('Confluence Range', 'n/a')} | "
+                    f"Expected retests: {row.get('Expected Retests', 'n/a')} | "
+                    f"Entry timing: {row.get('Entry Timing', 'n/a')}"
+                )
+
+        conf_reason_key = f"show_confluence_reasoning::{symbol}::{selected_date.isoformat()}"
+        if conf_reason_key not in st.session_state:
+            st.session_state[conf_reason_key] = False
+        conf_btn_label = (
+            "Hide Confluence Entry Reasoning"
+            if bool(st.session_state[conf_reason_key])
+            else "Show Confluence Entry Reasoning"
+        )
+        if st.button(conf_btn_label, key=f"{conf_reason_key}::btn"):
+            st.session_state[conf_reason_key] = not bool(st.session_state[conf_reason_key])
+
+        if bool(st.session_state[conf_reason_key]):
+            st.markdown("**Entry Confidence And Reasoning**")
+            for row in style_rows_sorted[:5]:
+                st.write(
+                    "- "
+                    f"{row.get('Confluence', 'n/a')} -> "
+                    f"{row.get('Entry Confidence', 'n/a')}/100 ({row.get('Confidence Tier', 'n/a')}) | "
+                    f"Suggested: {row.get('Suggested Time', 'n/a')} | "
+                    f"ETA: {row.get('Entry ETA (HH:MM)', 'n/a')} ({row.get('Entry Window', 'n/a')}) | "
+                    f"Formed: {row.get('Formed Time', 'n/a')} | "
+                    f"Range: {row.get('Confluence Range', 'n/a')}"
+                )
+                st.caption(str(row.get("Confidence Reasoning", "n/a")))
+                st.caption(str(row.get("Entry ETA Detail", "n/a")))
     else:
         st.write("No confluence entry style suggestions available.")
 
@@ -1452,6 +1724,10 @@ def render_strategy_playbook() -> None:
     execution_rows = playbook.get("entry_execution_tracker", []) or []
     if execution_rows:
         exec_df = pd.DataFrame(execution_rows)
+        if "Suggested App Time" not in exec_df.columns and "Suggested Time" in exec_df.columns:
+            exec_df["Suggested App Time"] = exec_df["Suggested Time"]
+        elif "Suggested App Time" in exec_df.columns and "Suggested Time" in exec_df.columns:
+            exec_df["Suggested App Time"] = exec_df["Suggested App Time"].fillna(exec_df["Suggested Time"])
         if "Suggested Time" in exec_df.columns:
             exec_df["_suggested_time_sort"] = pd.to_datetime(exec_df["Suggested Time"], errors="coerce")
             exec_df = exec_df.sort_values("_suggested_time_sort", ascending=False, na_position="last")
@@ -1461,24 +1737,28 @@ def render_strategy_playbook() -> None:
             columns={
                 "Session Marker": "Session marker",
                 "Suggested Time": "Suggested time",
+                "Suggested App Time": "Suggested app time",
                 "Entry Confidence": "Entry confidence",
                 "Confidence Tier": "Confidence tier",
                 "Confidence Reasoning": "Confidence reasoning",
                 "Execution Time": "Execution time",
                 "Exit Time": "Exit time",
+                "Risk Pts(Ticks)": "Risk Price(Ticks)",
+                "Target Pts(Ticks)": "Target Price(Ticks)",
             }
         )
         ordered = [
             "Session marker",
             "Suggested time",
+            "Suggested app time",
             "Entry ETA (HH:MM)",
             "Entry Window",
             "Action",
             "Confluence",
             "Suggested Entry",
             "Entry Price",
-            "Risk Pts(Ticks)",
-            "Target Pts(Ticks)",
+            "Risk Price(Ticks)",
+            "Target Price(Ticks)",
             "RR",
             "Entry confidence",
             "Confidence tier",
@@ -1507,24 +1787,62 @@ def render_strategy_playbook() -> None:
             f"successful={successful}, failed={failed}, open={open_count}, pending={pending}, unfilled={unfilled}, skipped={skipped}."
         )
 
-        st.markdown("**Entry Tracker Confidence And Reasoning**")
-        for row in execution_rows_sorted[:5]:
-            st.write(
-                "- "
-                f"{row.get('Confluence', 'n/a')} | Suggested: {row.get('Suggested Time', 'n/a')} | "
-                f"ETA: {row.get('Entry ETA (HH:MM)', 'n/a')} ({row.get('Entry Window', 'n/a')}) | "
-                f"Formed: {row.get('Confluence Formed Time', 'n/a')} | "
-                f"Range: {row.get('Confluence Range', 'n/a')} | "
-                f"Confidence {row.get('Entry Confidence', 'n/a')} ({row.get('Confidence Tier', 'n/a')})"
-            )
-            st.caption(str(row.get("Confidence Reasoning", row.get("Why", "n/a"))))
-            st.caption(str(row.get("Entry ETA Detail", "n/a")))
+        tracker_reason_key = f"show_tracker_reasoning::{symbol}::{selected_date.isoformat()}"
+        if tracker_reason_key not in st.session_state:
+            st.session_state[tracker_reason_key] = False
+        tracker_btn_label = (
+            "Hide Entry Tracker Reasoning"
+            if bool(st.session_state[tracker_reason_key])
+            else "Show Entry Tracker Reasoning"
+        )
+        if st.button(tracker_btn_label, key=f"{tracker_reason_key}::btn"):
+            st.session_state[tracker_reason_key] = not bool(st.session_state[tracker_reason_key])
+
+        if bool(st.session_state[tracker_reason_key]):
+            st.markdown("**Entry Tracker Confidence And Reasoning**")
+            for row in execution_rows_sorted[:5]:
+                st.write(
+                    "- "
+                    f"{row.get('Confluence', 'n/a')} | Suggested: {row.get('Suggested Time', 'n/a')} | "
+                    f"ETA: {row.get('Entry ETA (HH:MM)', 'n/a')} ({row.get('Entry Window', 'n/a')}) | "
+                    f"Formed: {row.get('Confluence Formed Time', 'n/a')} | "
+                    f"Range: {row.get('Confluence Range', 'n/a')} | "
+                    f"Confidence {row.get('Entry Confidence', 'n/a')} ({row.get('Confidence Tier', 'n/a')})"
+                )
+                st.caption(str(row.get("Confidence Reasoning", row.get("Why", "n/a"))))
+                st.caption(str(row.get("Entry ETA Detail", "n/a")))
     else:
         st.write("No execution records available yet.")
 
+    st.markdown("### Top 2 Unfilled Trade Picks")
+    top_picks = playbook.get("top_trade_picks", {}) or {}
+    top_picks_active = bool(top_picks.get("active", False))
+    top_picks_status = str(top_picks.get("status", ""))
+    if top_picks_status:
+        st.caption(top_picks_status)
+    top_rows = top_picks.get("rows", []) or []
+    top_detailed = top_picks.get("detailed_rows", []) or []
+    if top_picks_active and top_rows:
+        st.dataframe(pd.DataFrame(top_rows), use_container_width=True)
+        st.markdown("**Why These Trades Were Chosen**")
+        for row in top_detailed:
+            st.write(
+                "- "
+                f"{row.get('Confluence', 'n/a')} ({row.get('Action', 'Wait')}) was selected because it combines "
+                f"fill {float(row.get('Fill confidence', 0.0)):.1f}%, success {float(row.get('Success confidence', 0.0)):.1f}%, "
+                f"and low fail {float(row.get('Fail confidence', 0.0)):.1f}% with RR {row.get('RR', 'n/a')} and "
+                f"entry confidence {row.get('Entry Confidence', 'n/a')}.")
+            st.caption(
+                f"Liquidity score proxy: {row.get('_liq_score', 'n/a')} | Ranking score: {row.get('_rank_score', 'n/a')}"
+            )
+    elif top_picks_active:
+        st.write("No eligible unfilled directional trades are available yet.")
+    else:
+        st.write("Top picks are currently disabled for this view.")
+
     st.markdown("### Risk Engine")
     risk_engine = playbook.get("risk_engine", {}) or {}
-    trade_rows = playbook.get("confluence_entry_styles", []) or []
+    trade_rows = playbook.get("entry_execution_tracker", []) or []
     trade_options: list[tuple[str, dict]] = []
     for row in trade_rows:
         label = (
@@ -1535,6 +1853,14 @@ def render_strategy_playbook() -> None:
 
     selected_trade = None
     if trade_options:
+        best_trade_key = str(top_picks.get("best_trade_key", "")) if top_picks_active else ""
+        default_index = 0
+        if best_trade_key:
+            for i, (_, row) in enumerate(trade_options):
+                if _trade_row_key(row) == best_trade_key:
+                    default_index = i
+                    break
+
         left_col, right_col = st.columns([2.5, 2.0])
         with left_col:
             st.markdown("**Risk Engine View**")
@@ -1542,7 +1868,7 @@ def render_strategy_playbook() -> None:
             selected_label = st.selectbox(
                 "Suggested trade focus",
                 options=[lbl for lbl, _ in trade_options],
-                index=0,
+                index=default_index,
                 key="risk_engine_trade_focus",
             )
         selected_trade = next((row for lbl, row in trade_options if lbl == selected_label), None)
@@ -1605,6 +1931,12 @@ def render_strategy_playbook() -> None:
             f"Maximum target {display_max_target}"
         )
         st.caption(display_notes)
+
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Fill Confidence", f"{float(risk_engine.get('fill_confidence_pct', 0.0)):.1f}%")
+        p2.metric("Stop-Hit Confidence", f"{float(risk_engine.get('stop_hit_confidence_pct', 0.0)):.1f}%")
+        p3.metric("Target-Hit Confidence", f"{float(risk_engine.get('target_hit_confidence_pct', 0.0)):.1f}%")
+        st.caption(str(risk_engine.get("outcome_probability_note", "")))
 
         if alignment_factors:
             st.markdown("**What Aligned For This Risk Read**")

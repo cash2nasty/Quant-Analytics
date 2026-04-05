@@ -250,7 +250,7 @@ def _now_et() -> dt.datetime:
 
 def trading_day_window(trading_date: dt.date) -> tuple:
     start = dt.datetime.combine(trading_date - dt.timedelta(days=1), dt.time(18, 0))
-    end = dt.datetime.combine(trading_date, dt.time(17, 0))
+    end = dt.datetime.combine(trading_date, dt.time(16, 59, 59))
     return start, end
 
 
@@ -267,7 +267,7 @@ def compute_trading_day_extremes(df: pd.DataFrame, trading_date: dt.date):
     if df is None or df.empty:
         return (None, None, None, None)
     start = dt.datetime.combine(trading_date - dt.timedelta(days=1), dt.time(18, 0))
-    end = dt.datetime.combine(trading_date, dt.time(17, 0))
+    end = dt.datetime.combine(trading_date, dt.time(16, 59, 59))
     mask = (df["timestamp"] >= start) & (df["timestamp"] <= end)
     sdf = df.loc[mask]
     if sdf.empty:
@@ -424,16 +424,30 @@ def main():
     if df_prev is not None and not df_prev.empty and "timestamp" in df_prev.columns:
         df_prev["timestamp"] = pd.to_datetime(df_prev["timestamp"])
 
+    # Normalize the working intraday frame to the selected trading-day window (18:00 to 16:59 ET).
+    td_start, td_end = trading_day_window(effective_date)
+    if has_today_data:
+        if df_prev is not None and not df_prev.empty:
+            combined_td = pd.concat([df_prev, df_today], ignore_index=True).sort_values("timestamp")
+        else:
+            combined_td = df_today.copy()
+        combined_td = combined_td.drop_duplicates(subset=["timestamp"], keep="last")
+        df_today_td = combined_td[(combined_td["timestamp"] >= td_start) & (combined_td["timestamp"] <= td_end)].copy()
+        if not df_today_td.empty:
+            df_today = df_today_td.sort_values("timestamp").reset_index(drop=True)
+        else:
+            has_today_data = False
+    st.caption(
+        f"Trading day window: {td_start.strftime('%Y-%m-%d %H:%M')} to {td_end.strftime('%Y-%m-%d %H:%M')} ET"
+    )
+
     # Session windows and stats
     try:
         windows = get_session_windows_for_date(effective_date)
     except Exception:
         windows = {}
 
-    if has_today_data and df_prev is not None and not df_prev.empty:
-        df_sessions_source = pd.concat([df_prev, df_today], ignore_index=True).sort_values("timestamp")
-    else:
-        df_sessions_source = df_today if has_today_data else df_prev
+    df_sessions_source = df_today if has_today_data else df_prev
 
     sessions = compute_session_stats(df_sessions_source, effective_date) if df_sessions_source is not None else {}
     prev_sessions = compute_session_stats(df_prev, prev_date) if df_prev is not None and not df_prev.empty else {}

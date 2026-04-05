@@ -532,6 +532,51 @@ def _risk_engine(
     def _pct(value: float) -> float:
         return round(max(5.0, min(95.0, value)), 1)
 
+    def _probability_triplet(
+        side_value: str,
+        rr_value: float,
+        directional_prob_value: float,
+        momentum_conf_value: float,
+        participation_value: float,
+        rvol_value: float,
+        exp_value: float,
+        mean_value: float,
+        quality_value: float,
+    ) -> Tuple[float, float, float]:
+        # fill_confidence is unconditional probability that entry gets filled.
+        fill_conf = max(
+            5.0,
+            min(
+                95.0,
+                22.0
+                + (participation_value - 50.0) * 0.42
+                + (rvol_value - 1.0) * 26.0
+                + momentum_conf_value * 0.48
+                + (quality_value - 50.0) * 0.22,
+            ),
+        )
+
+        if side_value == "Wait":
+            fill_conf = min(fill_conf, 45.0)
+
+        success_given_fill = max(
+            10.0,
+            min(
+                90.0,
+                34.0
+                + (rr_value - 0.9) * 26.0
+                + (directional_prob_value - 50.0) * 0.46
+                + (exp_value - mean_value) * 0.22
+                + (quality_value - 50.0) * 0.30,
+            ),
+        )
+        stop_given_fill = 100.0 - success_given_fill
+
+        # Unconditional probabilities from suggestion time.
+        target_conf = max(1.0, min(95.0, fill_conf * (success_given_fill / 100.0)))
+        stop_conf = max(1.0, min(95.0, fill_conf * (stop_given_fill / 100.0)))
+        return (round(fill_conf, 1), round(stop_conf, 1), round(target_conf, 1))
+
     atr_like = float(volatility.get("atr_like", 1.0) or 1.0)
     side = "Long" if direction == "Bullish" else "Short" if direction == "Bearish" else "Wait"
     mom_up = float(momentum.get("prob_up", 50.0) or 50.0)
@@ -623,6 +668,10 @@ def _risk_engine(
             "expected_behavior": "Expect additional back-and-forth until one side clearly holds structure and VWAP context.",
             "post_trade_assumption": "After confirmation appears, the engine will publish stop and target levels with RR >= 0.90.",
             "strengthening_alignments": strengthening_alignments,
+            "fill_confidence_pct": 28.0,
+            "stop_hit_confidence_pct": 16.0,
+            "target_hit_confidence_pct": 12.0,
+            "outcome_probability_note": "Probabilities are unconditional from now: target/stop outcomes are low until a valid trigger forms.",
             "waiting_for_confirmations": confirmations,
         }
 
@@ -705,6 +754,10 @@ def _risk_engine(
                 "expected_behavior": "Unless range expands or stop can be tightened, price may not provide enough reward relative to risk.",
                 "post_trade_assumption": "If a larger directional move opens up, the engine will reactivate this setup once RR reaches at least 0.90.",
                 "strengthening_alignments": strengthening_alignments,
+                "fill_confidence_pct": 34.0,
+                "stop_hit_confidence_pct": 20.0,
+                "target_hit_confidence_pct": 14.0,
+                "outcome_probability_note": "Setup is RR-blocked, so stop risk currently outweighs target chance even if entry gets filled.",
                 "waiting_for_confirmations": confirmations,
             }
 
@@ -751,6 +804,18 @@ def _risk_engine(
         "After entry, assume continuation remains valid only while trigger-side structure is respected; violation of that structure invalidates the idea."
     )
 
+    fill_confidence, stop_confidence, target_confidence = _probability_triplet(
+        side_value=side,
+        rr_value=rr,
+        directional_prob_value=directional_prob,
+        momentum_conf_value=mom_conf,
+        participation_value=participation,
+        rvol_value=rvol,
+        exp_value=exp_prob,
+        mean_value=mean_prob,
+        quality_value=quality,
+    )
+
     return {
         "side": side,
         "entry": round(last_price, 2),
@@ -771,6 +836,10 @@ def _risk_engine(
         "expected_behavior": expected_behavior,
         "post_trade_assumption": post_trade_assumption,
         "strengthening_alignments": strengthening_alignments,
+        "fill_confidence_pct": fill_confidence,
+        "stop_hit_confidence_pct": stop_confidence,
+        "target_hit_confidence_pct": target_confidence,
+        "outcome_probability_note": "Probabilities are unconditional from now and include both fill chance and post-fill path risk.",
         "waiting_for_confirmations": [],
     }
 
@@ -1073,6 +1142,7 @@ def _evaluate_entry_executions(
         meta = {
             "Session Marker": f"{session_marker} {suggested_session}",
             "Suggested Time": suggested_time_str,
+            "Suggested App Time": row.get("Suggested App Time", suggested_time_str),
             "Entry ETA (HH:MM)": row.get("Entry ETA (HH:MM)", "n/a"),
             "Entry Window": row.get("Entry Window", "n/a"),
             "Entry ETA Detail": row.get("Entry ETA Detail", "n/a"),
@@ -1108,8 +1178,19 @@ def _evaluate_entry_executions(
             continue
 
         is_long = action == "Long"
-        use_mid = "midline" in suggested.lower() or "split" in suggested.lower()
-        entry_price = float(row.get("Midline Price", 0.0)) if use_mid else float(row.get("First Tap Price", 0.0))
+        suggested_l = suggested.lower()
+        use_mid = "midline" in suggested_l or "split" in suggested_l
+        use_rejection = "after rejection" in suggested_l
+        use_confirmed_exit = "confirmed exit" in suggested_l
+
+        if use_confirmed_exit:
+            entry_price = float(row.get("Close Outside Entry Price", row.get("Entry Price", 0.0)))
+        elif use_rejection:
+            entry_price = float(row.get("Entry Price", row.get("First Tap Price", 0.0)))
+        elif use_mid:
+            entry_price = float(row.get("Midline Price", 0.0))
+        else:
+            entry_price = float(row.get("First Tap Price", 0.0))
 
         # Build stop/target from suggestion first, then fall back to risk engine.
         if is_long:
@@ -1119,7 +1200,12 @@ def _evaluate_entry_executions(
             stop = max(entry_price + atr_like * 0.6, float(row.get("First Tap Price", entry_price)) + atr_like * 0.25)
             tgt = float(row.get("Preferred Target Price") or risk_engine.get("target") or (entry_price - atr_like * 1.5))
 
-        exec_time = _to_ts(row.get("Midline Time")) if use_mid else _to_ts(row.get("Tap Time"))
+        if use_confirmed_exit:
+            exec_time = _to_ts(row.get("Close Outside Confirm Time"))
+        elif use_rejection:
+            exec_time = _to_ts(row.get("Rejection Confirm Time"))
+        else:
+            exec_time = _to_ts(row.get("Midline Time")) if use_mid else _to_ts(row.get("Tap Time"))
         if exec_time is None:
             # Fallback: if style already marked as hit, use formed time as proxy.
             hit = str(row.get("Midline Hit" if use_mid else "Tap Hit", "No")) == "Yes"
@@ -1993,6 +2079,118 @@ def _first_zone_tap_time(
     return _fmt_ts(pd.to_datetime(hits.iloc[0]["timestamp"]))
 
 
+def _first_zone_tap_event(
+    df: pd.DataFrame,
+    zone_low: float,
+    zone_high: float,
+    formed_time: Optional[str] = None,
+) -> Tuple[Optional[pd.Timestamp], Optional[int]]:
+    if df is None or df.empty:
+        return None, None
+
+    work = df.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"])
+    if formed_time and formed_time != "n/a":
+        formed_ts = pd.to_datetime(formed_time, errors="coerce")
+        if pd.notna(formed_ts):
+            work = work[work["timestamp"] > formed_ts]
+
+    work = work.reset_index(drop=True)
+    hits = work[(work["low"] <= zone_high) & (work["high"] >= zone_low)]
+    if hits.empty:
+        return None, None
+
+    first_idx = int(hits.index[0])
+    first_ts = pd.to_datetime(hits.iloc[0]["timestamp"])
+    return first_ts, first_idx
+
+
+def _literal_first_tap_price(
+    df: pd.DataFrame,
+    zone_low: float,
+    zone_high: float,
+    formed_time: Optional[str] = None,
+) -> float:
+    tap_ts, tap_idx = _first_zone_tap_event(df, zone_low, zone_high, formed_time=formed_time)
+    if tap_ts is None or tap_idx is None:
+        if df is None or df.empty:
+            return zone_low
+        work = df.copy().sort_values("timestamp")
+        last_close = _safe_float(work.iloc[-1].get("close"))
+        if last_close < zone_low:
+            return float(zone_low)
+        if last_close > zone_high:
+            return float(zone_high)
+        if abs(last_close - zone_low) <= abs(last_close - zone_high):
+            return float(zone_low)
+        return float(zone_high)
+
+    work = df.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"])
+    if formed_time and formed_time != "n/a":
+        formed_ts = pd.to_datetime(formed_time, errors="coerce")
+        if pd.notna(formed_ts):
+            work = work[work["timestamp"] > formed_ts]
+    work = work.reset_index(drop=True)
+
+    tap_idx = min(max(int(tap_idx), 0), len(work) - 1)
+    tap_row = work.iloc[tap_idx]
+    if tap_idx > 0:
+        prev_close = _safe_float(work.iloc[tap_idx - 1].get("close"))
+    else:
+        prev_close = _safe_float(tap_row.get("open"))
+
+    if prev_close < zone_low:
+        return float(zone_low)
+    if prev_close > zone_high:
+        return float(zone_high)
+
+    tap_open = _safe_float(tap_row.get("open"))
+    if abs(tap_open - zone_low) <= abs(tap_open - zone_high):
+        return float(zone_low)
+    return float(zone_high)
+
+
+def _first_close_outside_after_touch(
+    df: pd.DataFrame,
+    zone_low: float,
+    zone_high: float,
+    side: str,
+    formed_time: Optional[str] = None,
+) -> Tuple[Optional[pd.Timestamp], Optional[float]]:
+    if df is None or df.empty:
+        return None, None
+
+    work = df.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"])
+    if formed_time and formed_time != "n/a":
+        formed_ts = pd.to_datetime(formed_time, errors="coerce")
+        if pd.notna(formed_ts):
+            work = work[work["timestamp"] > formed_ts]
+    work = work.sort_values("timestamp").reset_index(drop=True)
+
+    touch_seen = False
+    side_l = str(side or "").lower()
+    for _, bar in work.iterrows():
+        high = _safe_float(bar.get("high"))
+        low = _safe_float(bar.get("low"))
+        close = _safe_float(bar.get("close"))
+        ts = pd.to_datetime(bar.get("timestamp"))
+
+        if low <= zone_high and high >= zone_low:
+            touch_seen = True
+
+        if not touch_seen:
+            continue
+
+        if side_l == "bearish" and close < zone_low:
+            return ts, close
+        if side_l == "bullish" and close > zone_high:
+            return ts, close
+
+    return None, None
+
+
 def _first_midline_hit_time(
     df: pd.DataFrame,
     midline: float,
@@ -2051,6 +2249,12 @@ def _estimate_entry_eta(
     if "first tap" in style_l and tap_ts is not None:
         hhmm = tap_ts.strftime("%H:%M")
         return (hhmm, "0-1 min", f"First-tap level was already touched around {hhmm} ET.")
+    if "after rejection" in style_l and suggested_ts is not None:
+        hhmm = suggested_ts.strftime("%H:%M")
+        return (hhmm, "0-1 min", f"Rejection confirmation printed around {hhmm} ET.")
+    if "confirmed exit" in style_l and suggested_ts is not None:
+        hhmm = suggested_ts.strftime("%H:%M")
+        return (hhmm, "0-1 min", f"Close-outside confirmation printed around {hhmm} ET.")
 
     if suggested_ts is None:
         return ("n/a", "n/a", "No valid timestamp anchor is available yet to project an entry ETA.")
@@ -2191,6 +2395,7 @@ def _suggest_confluence_entry_styles(
     mode: str,
     whipsaw_risk: bool,
     windows: Optional[Dict[str, Dict[str, dt.datetime]]] = None,
+    suggested_app_time: Optional[str] = None,
 ) -> List[Dict[str, object]]:
     suggestions: List[Dict[str, object]] = []
     bar_minutes = _infer_bar_minutes(df, default_minutes=5)
@@ -2207,6 +2412,7 @@ def _suggest_confluence_entry_styles(
         formed_time = str(row.get("Formed Time", "n/a"))
 
         tap_time = _first_zone_tap_time(df, low, high, formed_time=formed_time)
+        literal_tap_price = _literal_first_tap_price(df, low, high, formed_time=formed_time)
         midline_time = _first_midline_hit_time(df, mid, formed_time=formed_time)
         tap_hit = tap_time is not None
         midline_hit = midline_time is not None
@@ -2234,8 +2440,19 @@ def _suggest_confluence_entry_styles(
         reaction_score = float(reaction.get("score", 0.0) or 0.0)
         reaction_reason = str(reaction.get("reason", "n/a"))
         reaction_time = str(reaction.get("event_time", "n/a"))
+        rejection_confirm_time = reaction_time if reaction_signal in {"Rejection", "Engulfing + Rejection"} else "n/a"
+        rejection_entry_price = _safe_float(row.get("Price Low" if side == "Bullish" else "Price High", mid), mid)
+        close_outside_time_ts, close_outside_entry = _first_close_outside_after_touch(
+            df=df,
+            zone_low=low,
+            zone_high=high,
+            side=side,
+            formed_time=formed_time,
+        )
+        close_outside_time = _fmt_ts(close_outside_time_ts) or "n/a"
         suggested_ts = (
-            _to_ts(reaction_time)
+            _to_ts(close_outside_time)
+            or _to_ts(reaction_time)
             or _to_ts(tap_time)
             or _to_ts(midline_time)
             or _to_ts(formed_time)
@@ -2272,14 +2489,29 @@ def _suggest_confluence_entry_styles(
                 style = "Split (Tap + Midline)"
                 reason = f"Moderate {reaction_signal.lower()} reaction suggests partial fill at tap and add near midline."
 
+        action = "Long" if side == "Bullish" else "Short" if side == "Bearish" else "Wait"
+        if invalidated:
+            action = "Wait"
+
+        if not invalidated and close_outside_time != "n/a" and action in {"Long", "Short"}:
+            style = "After Confirmed Exit"
+            reason = (
+                "Enter only after price tested the zone and closed back outside in-direction "
+                "without invalidating the setup."
+            )
+            suggested_ts = _to_ts(close_outside_time) or suggested_ts
+        elif reaction_signal in {"Rejection", "Engulfing + Rejection"} and action in {"Long", "Short"}:
+            style = "After Rejection"
+            reason = f"Enter after rejection confirmation ({reaction_signal.lower()}) instead of immediate touch entry."
+            suggested_ts = _to_ts(rejection_confirm_time) or suggested_ts
+
+        session_marker, suggested_session = _session_marker_for_time(suggested_ts, windows)
+        suggested_time_str = _fmt_ts(suggested_ts) or "n/a"
+
         if preferred_tgt is not None:
             exit_plan = f"Scale at preferred target {preferred_tgt:.2f}; extend toward {max_tgt:.2f}."
         else:
             exit_plan = "Use nearest qualified ladder target; exit early on invalidation."
-
-        action = "Long" if side == "Bullish" else "Short" if side == "Bearish" else "Wait"
-        if invalidated:
-            action = "Wait"
 
         if reaction_score >= 70.0:
             expected_retests = "0-1 likely before continuation"
@@ -2295,9 +2527,14 @@ def _suggest_confluence_entry_styles(
             entry_timing = "Zone already tested; wait for fresh confirmation candle."
 
         entry_style_key = style.lower()
-        entry_price_for_metrics = mid if ("midline" in entry_style_key or "split" in entry_style_key) else (
-            low if side == "Bullish" else high
-        )
+        if "confirmed exit" in entry_style_key and close_outside_entry is not None:
+            entry_price_for_metrics = float(close_outside_entry)
+        elif "after rejection" in entry_style_key and rejection_confirm_time != "n/a":
+            entry_price_for_metrics = rejection_entry_price
+        elif "midline" in entry_style_key or "split" in entry_style_key:
+            entry_price_for_metrics = mid
+        else:
+            entry_price_for_metrics = literal_tap_price
         risk_points_style = max(0.25, abs(entry_price_for_metrics - (low if side == "Bullish" else high)))
         target_price_style = preferred_tgt
         if target_price_style is None:
@@ -2334,6 +2571,7 @@ def _suggest_confluence_entry_styles(
             {
                 "Session Marker": f"{session_marker} {suggested_session}",
                 "Suggested Time": suggested_time_str,
+                "Suggested App Time": suggested_time_str,
                 "Entry ETA (HH:MM)": eta_hhmm,
                 "Entry Window": eta_window,
                 "Entry ETA Detail": eta_detail,
@@ -2345,7 +2583,7 @@ def _suggest_confluence_entry_styles(
                 "Status": status,
                 "Formed Time": formed_time,
                 "Suggested Entry": style,
-                "First Tap Price": round(low if "bullish" in name_l else high, 2),
+                "First Tap Price": round(literal_tap_price, 2),
                 "Midline Price": round(mid, 2),
                 "Entry Price": round(entry_price_for_metrics, 2),
                 "Risk (Ticks)": risk_ticks_style,
@@ -2363,6 +2601,9 @@ def _suggest_confluence_entry_styles(
                 "Reaction Score": round(reaction_score, 1),
                 "Reaction Time": reaction_time,
                 "Reaction Why": reaction_reason,
+                "Rejection Confirm Time": rejection_confirm_time,
+                "Close Outside Confirm Time": close_outside_time,
+                "Close Outside Entry Price": round(float(close_outside_entry), 2) if close_outside_entry is not None else "n/a",
                 "Preferred Target Price": round(preferred_tgt, 2) if preferred_tgt is not None else None,
                 "Minimum Target Price": round(min_tgt, 2) if min_tgt is not None else None,
                 "Maximum Target Price": round(max_tgt, 2) if max_tgt is not None else None,
@@ -2611,6 +2852,7 @@ def build_strategy_playbook(
     zones: List[Zone],
     now_et: Optional[dt.datetime] = None,
     whipsaw_threshold: float = 3.0,
+    trading_day: Optional[dt.date] = None,
 ) -> Dict[str, object]:
     if df_today is None or df_today.empty:
         return {
@@ -2653,7 +2895,8 @@ def build_strategy_playbook(
     df = df_today.copy().sort_values("timestamp")
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
-    trade_date = pd.to_datetime(df["timestamp"].iloc[-1]).date()
+    inferred_trade_date = pd.to_datetime(df["timestamp"].iloc[-1]).date()
+    trade_date = trading_day or inferred_trade_date
     windows = get_session_windows_for_date(trade_date)
     now = now_et or pd.to_datetime(df["timestamp"].iloc[-1]).to_pydatetime()
 
@@ -3012,6 +3255,7 @@ def build_strategy_playbook(
         mode=ny_mode,
         whipsaw_risk=whipsaw_risk,
         windows=windows,
+        suggested_app_time=_fmt_ts(pd.Timestamp(now)) or "n/a",
     )
     entry_blueprints = _entry_blueprints(
         ny_mode,
