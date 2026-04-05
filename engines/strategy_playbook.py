@@ -2398,6 +2398,7 @@ def _suggest_confluence_entry_styles(
     suggested_app_time: Optional[str] = None,
 ) -> List[Dict[str, object]]:
     suggestions: List[Dict[str, object]] = []
+    allowed_sessions = {"Pre NY", "NY", "Power Hour"}
     bar_minutes = _infer_bar_minutes(df, default_minutes=5)
     preferred_tgt, min_tgt, max_tgt = _entry_style_target_prices(target_ladder)
     for row in reference_rows:
@@ -2507,6 +2508,14 @@ def _suggest_confluence_entry_styles(
 
         session_marker, suggested_session = _session_marker_for_time(suggested_ts, windows)
         suggested_time_str = _fmt_ts(suggested_ts) or "n/a"
+
+        # Restrict trade suggestions to pre-NY and NY sessions only, from 08:00 onward.
+        if suggested_ts is None:
+            continue
+        if pd.Timestamp(suggested_ts).time() < dt.time(8, 0):
+            continue
+        if suggested_session not in allowed_sessions:
+            continue
 
         if preferred_tgt is not None:
             exit_plan = f"Scale at preferred target {preferred_tgt:.2f}; extend toward {max_tgt:.2f}."
