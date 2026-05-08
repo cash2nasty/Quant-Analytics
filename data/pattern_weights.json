@@ -1,7 +1,7 @@
 {
   "weights": {
     "default": 0.5,
-    "bearish": 0.644,
-    "bullish": 0.56
+    "bearish": 0.44,
+    "bullish": 0.65
   }
 }

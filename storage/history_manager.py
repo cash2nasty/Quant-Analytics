@@ -60,6 +60,16 @@ class BiasSummary:
     us_open_bias_60: Optional[str] = None
     us_open_confidence_60: Optional[float] = None
     amd_summary: Optional[str] = None
+    daily_finalized: Optional[bool] = None
+    daily_finalized_at: Optional[str] = None
+    us_open_finalized_30: Optional[bool] = None
+    us_open_finalized_30_at: Optional[str] = None
+    us_open_finalized_60: Optional[bool] = None
+    us_open_finalized_60_at: Optional[str] = None
+    combined_bias: Optional[str] = None
+    combined_confidence: Optional[float] = None
+    combined_finalized: Optional[bool] = None
+    combined_finalized_at: Optional[str] = None
 
 
 @dataclass
@@ -77,6 +87,10 @@ class AccuracySummary:
     us_open_bias_correct: bool
     us_open_bias_correct_30: Optional[bool] = None
     us_open_bias_correct_60: Optional[bool] = None
+    close_position_pct: Optional[float] = None
+    close_quality: Optional[str] = None
+    close_quality_band: Optional[str] = None
+    session_accuracy: Optional[Dict[str, Dict[str, object]]] = None
 
 
 @dataclass
@@ -153,6 +167,10 @@ def load_all_summaries() -> List[DaySummary]:
             us_open_bias_correct=acc_data.get("us_open_bias_correct", False),
             us_open_bias_correct_30=acc_data.get("us_open_bias_correct_30"),
             us_open_bias_correct_60=acc_data.get("us_open_bias_correct_60"),
+            close_position_pct=acc_data.get("close_position_pct"),
+            close_quality=acc_data.get("close_quality"),
+            close_quality_band=acc_data.get("close_quality_band"),
+            session_accuracy=acc_data.get("session_accuracy"),
         )
         summaries.append(
             DaySummary(

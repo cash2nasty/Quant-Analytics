@@ -36,6 +36,8 @@ from indicators.statistics import zscore
 from indicators.volatility import rolling_volatility, atr_like
 from indicators.momentum import roc, trend_strength
 from indicators.volume import rvol
+from engines.unified_bias import build_unified_bias
+from ui.bias_composite import render_unified_bias_panel
 from storage.history_manager import (
     BiasSummary,
     DaySummary,
@@ -150,6 +152,55 @@ def format_break(event) -> str:
     if ts is None:
         return "Break detected"
     return f"{ts:%Y-%m-%d %H:%M} @ {price:.2f}"
+
+
+def _finalization_line(is_finalized: Optional[bool], finalize_at: Optional[str]) -> str:
+    if is_finalized is True:
+        return f"Finalized ({finalize_at or 'n/a'})"
+    return "Not Finalized"
+
+
+def _normalize_pattern_bias(raw_bias: Optional[str]) -> str:
+    text = str(raw_bias or "").strip().lower()
+    if text in {"bullish", "bearish"}:
+        return text
+    if text in {"neutral", "mixed", "mixed signals"}:
+        return "neutral (mixed signals)"
+    if text in {"unfinished", "pending"}:
+        return "unfinished"
+    return ""
+
+
+def _pattern_bias_status(
+    pattern_name: str,
+    active: bool,
+    raw_bias: Optional[str],
+    now: dt.datetime,
+    windows: Optional[dict],
+) -> str:
+    normalized = _normalize_pattern_bias(raw_bias)
+    if active:
+        return normalized if normalized else "true"
+
+    cutoff = None
+    if windows is None:
+        windows = {}
+    if pattern_name in {"ORB 30m", "Failed ORB 30m"}:
+        us_start = windows.get("US", {}).get("start")
+        if us_start is not None:
+            cutoff = us_start + dt.timedelta(minutes=30)
+    elif pattern_name in {"ORB 60m", "Failed ORB 60m"}:
+        us_start = windows.get("US", {}).get("start")
+        if us_start is not None:
+            cutoff = us_start + dt.timedelta(minutes=60)
+    elif pattern_name == "Power Hour Trend":
+        cutoff = windows.get("US", {}).get("end")
+
+    if cutoff is not None and now < cutoff:
+        return "unfinished"
+    if normalized:
+        return normalized
+    return "false"
 
 
 def session_range_std(df: pd.DataFrame, start: dt.datetime, end: dt.datetime):
@@ -351,6 +402,12 @@ def build_preview_bias(
         explanation=explanation,
         vwap_comment="VWAP posture will update once intraday data is available.",
         news_comment="News signal will update with the live feed.",
+        daily_finalized=False,
+        daily_finalized_at="10:45 ET",
+        us_open_finalized_30=False,
+        us_open_finalized_30_at="10:00 ET",
+        us_open_finalized_60=False,
+        us_open_finalized_60_at="10:45 ET",
     )
 
 
@@ -590,22 +647,32 @@ def main():
     patterns = detect_patterns(sessions, df_today if has_today_data else None, df_prev)
     st.markdown("### Structural Patterns")
     trend_label = trend_day_direction(sessions) if getattr(patterns, "trend_day", False) else "n/a"
-    pattern_rows = [
-        {"Pattern": "London Breakout", "Active": getattr(patterns, "london_breakout", False), "Bias": "n/a"},
-        {"Pattern": "Whipsaw", "Active": getattr(patterns, "whipsaw", False), "Bias": "n/a"},
-        {"Pattern": "Trend Day", "Active": getattr(patterns, "trend_day", False), "Bias": trend_label},
-        {"Pattern": "Volatility Expansion", "Active": getattr(patterns, "volatility_expansion", False), "Bias": "n/a"},
-        {"Pattern": "Asia Range Hold", "Active": getattr(patterns, "asia_range_hold", False), "Bias": "n/a"},
-        {"Pattern": "Asia Range Sweep", "Active": getattr(patterns, "asia_range_sweep", False), "Bias": getattr(patterns, "asia_range_sweep_bias", "n/a")},
-        {"Pattern": "London Continuation", "Active": getattr(patterns, "london_continuation", False), "Bias": getattr(patterns, "london_continuation_bias", "n/a")},
-        {"Pattern": "US Open Gap Fill", "Active": getattr(patterns, "us_open_gap_fill", False), "Bias": getattr(patterns, "us_open_gap_fill_bias", "n/a")},
-        {"Pattern": "ORB 30m", "Active": getattr(patterns, "orb_30", False), "Bias": getattr(patterns, "orb_30_bias", "n/a")},
-        {"Pattern": "ORB 60m", "Active": getattr(patterns, "orb_60", False), "Bias": getattr(patterns, "orb_60_bias", "n/a")},
-        {"Pattern": "Failed ORB 30m", "Active": getattr(patterns, "failed_orb_30", False), "Bias": getattr(patterns, "failed_orb_30_bias", "n/a")},
-        {"Pattern": "Failed ORB 60m", "Active": getattr(patterns, "failed_orb_60", False), "Bias": getattr(patterns, "failed_orb_60_bias", "n/a")},
-        {"Pattern": "Power Hour Trend", "Active": getattr(patterns, "power_hour_trend", False), "Bias": getattr(patterns, "power_hour_bias", "n/a")},
-        {"Pattern": "VWAP Reclaim/Reject", "Active": getattr(patterns, "vwap_reclaim_reject", False), "Bias": getattr(patterns, "vwap_reclaim_reject_bias", "n/a")},
+    pattern_specs = [
+        ("London Breakout", "london_breakout", None),
+        ("Whipsaw", "whipsaw", None),
+        ("Trend Day", "trend_day", trend_label),
+        ("Volatility Expansion", "volatility_expansion", None),
+        ("Asia Range Hold", "asia_range_hold", None),
+        ("Asia Range Sweep", "asia_range_sweep", getattr(patterns, "asia_range_sweep_bias", None)),
+        ("London Continuation", "london_continuation", getattr(patterns, "london_continuation_bias", None)),
+        ("US Open Gap Fill", "us_open_gap_fill", getattr(patterns, "us_open_gap_fill_bias", None)),
+        ("ORB 30m", "orb_30", getattr(patterns, "orb_30_bias", None)),
+        ("ORB 60m", "orb_60", getattr(patterns, "orb_60_bias", None)),
+        ("Failed ORB 30m", "failed_orb_30", getattr(patterns, "failed_orb_30_bias", None)),
+        ("Failed ORB 60m", "failed_orb_60", getattr(patterns, "failed_orb_60_bias", None)),
+        ("Power Hour Trend", "power_hour_trend", getattr(patterns, "power_hour_bias", None)),
+        ("VWAP Reclaim/Reject", "vwap_reclaim_reject", getattr(patterns, "vwap_reclaim_reject_bias", None)),
     ]
+    pattern_rows = []
+    for name, active_attr, raw_bias in pattern_specs:
+        active = bool(getattr(patterns, active_attr, False))
+        pattern_rows.append(
+            {
+                "Pattern": name,
+                "Active": active,
+                "Bias": _pattern_bias_status(name, active, raw_bias, now, windows),
+            }
+        )
     st.dataframe(pd.DataFrame(pattern_rows), use_container_width=True, hide_index=True)
     if getattr(patterns, "notes", None):
         st.info(patterns.notes)
@@ -893,6 +960,7 @@ def main():
         f"Daily Bias: {daily_bias} ({daily_conf:.0%}). "
         f"Meaning for today: directional setups aligned with {str(daily_bias).lower()} have higher odds unless intraday structure invalidates this stance."
     )
+    st.caption(_finalization_line(getattr(bias, "daily_finalized", None), getattr(bias, "daily_finalized_at", None)))
     us_30 = getattr(bias, "us_open_bias_30", None) or getattr(bias, "us_open_bias", "n/a")
     us_60 = getattr(bias, "us_open_bias_60", None) or getattr(bias, "us_open_bias", "n/a")
     us_30_conf = getattr(bias, "us_open_confidence_30", None)
@@ -905,11 +973,27 @@ def main():
         f"US Open Bias 30m: {us_30} ({us_30_conf:.0%}). "
         "Meaning for today: this frames the opening impulse, so early continuation/reversal setups should be judged against this first 30-minute read."
     )
+    st.caption(_finalization_line(getattr(bias, "us_open_finalized_30", None), getattr(bias, "us_open_finalized_30_at", None)))
     st.write(
         f"US Open Bias 60m: {us_60} ({us_60_conf:.0%}). "
         "Meaning for today: this is the stronger opening confirmation; alignment with it supports holding directional conviction into mid-session."
     )
-    st.caption("Finalized at 09:10 ET using overnight range, gap, VWAP, and premarket trend.")
+    st.caption(_finalization_line(getattr(bias, "us_open_finalized_60", None), getattr(bias, "us_open_finalized_60_at", None)))
+    unified_payload = build_unified_bias(
+        df_today=df_today if has_today_data else pd.DataFrame(),
+        df_prev=df_prev,
+        trading_date=effective_date,
+        now_et=now,
+    )
+    combined_result = render_unified_bias_panel(
+        panel_title="Combined Daily + NY Session/Open Bias",
+        panel_key=f"live::{effective_date.isoformat()}",
+        unified_payload=unified_payload,
+    )
+    st.caption(
+        f"Combined bias snapshot: {combined_result.get('daily', {}).get('bias', 'Neutral')} "
+        f"({float(combined_result.get('daily', {}).get('confidence', 0.0)):.0%})"
+    )
     vwap_comment = getattr(bias, "vwap_comment", "")
     st.write(
         f"VWAP Posture: {vwap_comment}. "

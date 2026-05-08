@@ -14,6 +14,8 @@ from indicators.moving_averages import compute_daily_vwap
 from indicators.statistics import zscore
 from indicators.volatility import atr_like, classify_volatility, rolling_volatility
 from indicators.volume import rvol
+from engines.unified_bias import build_unified_bias
+from ui.bias_composite import render_unified_bias_panel
 
 try:
     from zoneinfo import ZoneInfo
@@ -134,7 +136,7 @@ def _is_finalized(selected_date: dt.date, cutoff: dt.datetime, now_ref: dt.datet
 
 
 def _phase_status_text(is_final: bool) -> str:
-    return "Final" if is_final else "Pending"
+    return "Finalized" if is_final else "Not Finalized"
 
 
 def _evaluate_alignment(predicted: str, actual: str) -> str:
@@ -159,6 +161,17 @@ def _session_path_sentence(name: str, df: pd.DataFrame) -> str:
         f"{name} traded from {s_open:.2f} to {s_close:.2f} with a {direction.lower()} finish, "
         f"printing a range from {s_low:.2f} to {s_high:.2f}."
     )
+
+
+def _direction_evidence_sentence(direction: str, evidence: list) -> str:
+    if not evidence:
+        return "Signals are mixed, so directional conviction is muted."
+    lead = ", ".join(evidence[:3])
+    if direction == "Bullish":
+        return f"Bullish evidence is led by {lead}, which supports upside continuation if opening structure holds."
+    if direction == "Bearish":
+        return f"Bearish evidence is led by {lead}, which supports downside continuation if opening structure holds."
+    return f"Evidence is mixed ({lead}), which favors rotational behavior until one side gains acceptance."
 
 
 def _render_analysis_card(title: str, body: str) -> None:
@@ -444,6 +457,8 @@ def render_market_statistics_tab() -> None:
                 st.rerun()
 
     prev_date = _prev_trading_day(selected_date)
+    inherited_key = f"ms_inherited_outlook::{selected_date.isoformat()}"
+    inherited_outlook = st.session_state.get(inherited_key)
     res_today = fetch_intraday_ohlcv(symbol, selected_date)
     res_prev = fetch_intraday_ohlcv(symbol, prev_date)
 
@@ -678,6 +693,7 @@ def render_market_statistics_tab() -> None:
     session_expansion_value = f"{session_expansion_rate:.2f}" if ny_done else _unfinished_label(False, windows["US"]["end"])
 
     st.subheader("Session Structure")
+    st.caption(f"Last update: {last_data_time_label}")
     struct_rows = [
         {"Metric": "Overnight High/Low", "Value": f"{overnight_high:.2f} / {overnight_low:.2f}" if np.isfinite(overnight_high) and np.isfinite(overnight_low) else "n/a"},
         {"Metric": "Overnight Range", "Value": f"{overnight_range:.2f}"},
@@ -722,6 +738,7 @@ def render_market_statistics_tab() -> None:
         st.caption(f"Session Structure is neutral because {session_reason}.")
 
     st.subheader("Profile and Context")
+    st.caption(f"Last update: {last_data_time_label}")
     profile_rows = [
         {"Metric": "POC", "Value": f"{poc:.2f}" if np.isfinite(poc) else "n/a"},
         {"Metric": "VAH", "Value": f"{vah:.2f}" if np.isfinite(vah) else "n/a"},
@@ -763,6 +780,7 @@ def render_market_statistics_tab() -> None:
         st.caption(f"Profile/Context is neutral because {profile_reason}.")
 
     st.subheader("Regime Dashboard")
+    st.caption(f"Last update: {last_data_time_label}")
     regime_rows = [
         {"Regime": "Trend", "State": trend_regime},
         {"Regime": "Balance", "State": balance_regime},
@@ -932,23 +950,48 @@ def render_market_statistics_tab() -> None:
 
     daily_bias_cutoff = dt.datetime.combine(selected_date, dt.time(10, 45))
     daily_bias_finalized = _is_finalized(selected_date, daily_bias_cutoff, now_ref)
+    stats_votes = [
+        vwap_bias,
+        twap_bias,
+        overnight_bias,
+        london_bias,
+        ny_open_bias,
+        opening_drive_bias,
+        gap_bias,
+        profile_bias,
+        momentum_bias,
+    ]
+    stats_result, stats_conf_raw = _vote_direction(stats_votes)
+    stats_conf = _clamp(0.40 + 0.50 * stats_conf_raw, 0.30, 0.92)
+
+    finalized_votes = []
+    if session_result in ("Bullish", "Bearish") and london_done and ny_open_done and opening_drive_done:
+        finalized_votes.append(session_result)
+    if profile_context_result in ("Bullish", "Bearish") and ny_done:
+        finalized_votes.append(profile_context_result)
+    if regime_result in ("Bullish", "Bearish") and ny_done:
+        finalized_votes.append(regime_result)
+    finalized_result, finalized_conf_raw = _vote_direction(finalized_votes)
+    finalized_conf = _clamp(0.40 + 0.50 * finalized_conf_raw, 0.30, 0.92)
+
     daily_bias_components = [
         (overall, confidence),
         (session_result, session_conf),
         (profile_context_result, profile_context_conf),
         (regime_result, regime_conf),
+        (stats_result, stats_conf),
+        (finalized_result, finalized_conf),
     ]
     daily_bias, daily_bias_conf, daily_bias_weighted = _combine_directional_components(daily_bias_components)
-    if daily_bias == "Neutral":
-        daily_bias = "Bullish" if daily_bias_weighted >= 0 else "Bearish"
     daily_bias_updated_label = _now_et().strftime("%H:%M:%S ET")
     st.subheader("Daily bias")
     st.caption(f"Last updated: {daily_bias_updated_label}")
     st.write(
         f"Daily bias is {daily_bias.lower()} with {daily_bias_conf:.0%} confidence, combined from High-Impact Confluence, Session Structure, "
-        f"Profile/Context, and Regime section results. "
-        f"Status: {'Finalized' if daily_bias_finalized else f'Unfinished (finalizes by {daily_bias_cutoff:%H:%M} ET)'}"
+        f"Profile/Context, Regime, broader statistics, and finalized summaries on this tab. "
+        f"Status: {'Finalized' if daily_bias_finalized else 'Not Finalized'}"
     )
+    st.caption(f"Daily bias finalization time: {daily_bias_cutoff:%H:%M} ET")
 
     st.markdown(
         """
@@ -975,6 +1018,8 @@ def render_market_statistics_tab() -> None:
     )
 
     st.subheader("Pre Session Analysis")
+    if inherited_outlook:
+        st.info(f"Inherited Context: {inherited_outlook}")
 
     atr_threshold = max(atr_last * 0.05, 0.0)
 
@@ -1034,33 +1079,74 @@ def render_market_statistics_tab() -> None:
     ny_open_alignment = _evaluate_alignment(ny_open_hyp_dir, ny_open_actual)
     ny_session_alignment = _evaluate_alignment(ny_session_hyp_dir, ny_actual)
 
+    market_open_evidence = [
+        f"previous day type {prev_day_type}",
+        f"previous close location {prev_close_location}",
+        f"gap context {gap_bias.lower()}",
+    ]
+    asia_evidence = [
+        f"overnight trend {overnight_trend:+.4f}",
+        f"market-open hypothesis {market_open_dir.lower()}",
+        f"overnight position {overnight_position.lower()}",
+    ]
+    london_evidence = [
+        f"Asia realized direction {asia_actual.lower()}",
+        f"London sweep {london_sweep.lower()}",
+        f"session expansion rate {session_expansion_rate:.2f}",
+    ]
+    ny_open_evidence = [
+        f"NY open location {ny_open_overnight.lower()}",
+        f"opening drive {opening_drive_bias.lower()}",
+        f"gap-fill probability {gap_fill_prob:.0%}",
+    ]
+    ny_session_evidence = [
+        f"momentum regime {momentum_bias.lower()}",
+        f"profile location bias {profile_bias.lower()}",
+        f"relative volume {rel_volume:.2f}",
+    ]
+
     market_open_sentence = (
         f"Market Open Plan ({_phase_status_text(mkt_open_plan_final)} by 17:30 ET): using previous-day statistics including day type ({prev_day_type}), "
         f"close location ({prev_close_location}), and prior directional move ({prev_day_move_dir.lower()}), the hypothesis projects a {market_open_dir.lower()} open with "
         f"{market_open_conf:.0%} confidence, a gap-fill probability of {gap_fill_prob:.0%}, and an expectation that price will "
-        f"{'seek continuation away from value' if market_open_dir in ('Bullish', 'Bearish') else 'trade rotationally around value'}; {market_open_alignment}"
+        f"{'seek continuation away from value' if market_open_dir in ('Bullish', 'Bearish') else 'trade rotationally around value'}; {market_open_alignment} "
+        f"{_direction_evidence_sentence(market_open_dir, market_open_evidence)}"
     )
     asia_sentence = (
         f"Asia Session Hypothesis ({_phase_status_text(asia_final)} 15 minutes after Asia open): using previous-day context, market-open plan, overnight trend "
         f"({overnight_trend:+.4f}), and gap posture ({gap_bias.lower()}), Asia was expected to be {asia_hyp_dir.lower()} with {asia_hyp_conf:.0%} confidence, "
-        f"and the realized Asia outcome was {asia_actual.lower()}; {asia_alignment}"
+        f"and the realized Asia outcome was {asia_actual.lower()}; {asia_alignment} "
+        f"{_direction_evidence_sentence(asia_hyp_dir, asia_evidence)}"
     )
     london_sentence = (
         f"London Session Hypothesis ({_phase_status_text(london_final)} 15 minutes after London open): using previous-day context, market-open plan, and Asia outcome "
         f"({asia_actual.lower()}), London was expected to be {london_hyp_dir.lower()} with {london_hyp_conf:.0%} confidence, and the realized London outcome was "
-        f"{london_actual.lower()}; {london_alignment}"
+        f"{london_actual.lower()}; {london_alignment} "
+        f"{_direction_evidence_sentence(london_hyp_dir, london_evidence)}"
     )
     ny_open_sentence = (
         f"NY Open Hypothesis ({_phase_status_text(ny_open_final)} by 09:15 ET): using previous-day, market-open, Asia, and London statistics, NY open was expected "
         f"to be {ny_open_hyp_dir.lower()} with {ny_open_hyp_conf:.0%} confidence, with immediate behavior biased to "
         f"{'continuation' if ny_open_hyp_dir in ('Bullish', 'Bearish') else 'rotation'} at the open and then "
         f"{'follow-through if OR breaks and holds' if ny_open_hyp_dir in ('Bullish', 'Bearish') else 'reversion unless OR expands with volume'} after the 30-minute OR forms; "
-        f"{ny_open_alignment}"
+        f"{ny_open_alignment} {_direction_evidence_sentence(ny_open_hyp_dir, ny_open_evidence)}"
     )
     ny_session_sentence = (
         f"NY Session Hypothesis ({_phase_status_text(ny_session_final)} by 10:35 ET): after 30-minute and 60-minute OR information, the combined statistics expected "
         f"a {ny_session_hyp_dir.lower()} NY session with {ny_session_hyp_conf:.0%} confidence, while realized NY session direction was {ny_actual.lower()}; "
-        f"{ny_session_alignment}"
+        f"{ny_session_alignment} {_direction_evidence_sentence(ny_session_hyp_dir, ny_session_evidence)}"
+    )
+
+    unified_payload = build_unified_bias(
+        df_today=day_df,
+        df_prev=prev_day_df,
+        trading_date=selected_date,
+        now_et=now_ref,
+    )
+    render_unified_bias_panel(
+        panel_title="Combined Daily + NY Session/Open Bias",
+        panel_key=f"market_stats::{selected_date.isoformat()}",
+        unified_payload=unified_payload,
     )
 
     pre_cards = [
@@ -1092,7 +1178,8 @@ def render_market_statistics_tab() -> None:
     )
     ny_review = (
         f"NY Session Post-Session Review ({_phase_status_text(ny_done)}): {_session_path_sentence('NY Session', us_df)} "
-        f"The statistics had assumed a {ny_session_hyp_dir.lower()} path at {ny_session_hyp_conf:.0%} confidence, and {ny_session_alignment.lower()}"
+        f"The statistics had assumed a {ny_session_hyp_dir.lower()} path at {ny_session_hyp_conf:.0%} confidence, and {ny_session_alignment.lower()} "
+        f"Stat drivers were momentum ({momentum_regime}), profile location ({profile_bias}), and opening-drive carry ({opening_drive_bias})."
     )
 
     post_cards = [
@@ -1112,10 +1199,38 @@ def render_market_statistics_tab() -> None:
             bias_truth = "True" if daily_bias == day_actual else "False"
         else:
             bias_truth = "Inconclusive"
+        close_pos_pct = ((float(day_df["close"].iloc[-1]) - float(day_df["low"].min())) / max(float(day_df["high"].max() - day_df["low"].min()), 1e-6)) * 100.0
+        if close_pos_pct <= 30:
+            close_quality = "weak close"
+        elif close_pos_pct >= 70:
+            close_quality = "strong close"
+        else:
+            close_quality = "normal close"
         eod_sentence = (
             f"End of Day Summary ({_phase_status_text(eod_final)} at selected trading-day close): Asia was {asia_actual.lower()}, London was {london_actual.lower()}, "
             f"and NY was {ny_actual.lower()}, while the full-day confluence model expected a {overall.lower()} outcome at {confidence:.0%} confidence; "
             f"{eod_alignment} The selected trading day closed with {day_actual.lower()} direction and profile shape {profile_shape}. "
-            f"Daily bias validation was {bias_truth} (daily bias: {daily_bias}, realized day direction: {day_actual})."
+            f"Daily bias validation was {bias_truth} (daily bias: {daily_bias}, realized day direction: {day_actual}). "
+            f"Close quality was {close_quality} at {close_pos_pct:.1f}% of the session range."
         )
         st.write(eod_sentence)
+
+        next_session_bias, _, _ = _combine_directional_components(
+            [
+                (day_actual, 0.55),
+                (daily_bias, daily_bias_conf),
+                (ny_actual, 0.50),
+                ("Bullish" if close_pos_pct >= 70 else "Bearish" if close_pos_pct <= 30 else "Neutral", 0.45),
+            ]
+        )
+        st.markdown("**Next Session Outlook**")
+        st.write(
+            f"Based on session statistics, close quality ({close_quality}), and profile posture ({profile_shape}), "
+            f"the next session opens with a {next_session_bias.lower()} expectation. "
+            "Treat this as inherited context and refresh it with live overnight structure."
+        )
+        next_day_key = f"ms_inherited_outlook::{_next_trading_day(selected_date).isoformat()}"
+        st.session_state[next_day_key] = (
+            f"Prior session ended {day_actual.lower()} with a {close_quality} ({close_pos_pct:.1f}% range close), "
+            f"profile shape {profile_shape}, and next-session directional lean {next_session_bias.lower()}."
+        )

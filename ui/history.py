@@ -313,6 +313,21 @@ def render_history():
             us60_total = sum(1 for a in acc_list if a.us_open_bias_correct_60 is not None)
             us60_correct = sum(1 for a in acc_list if a.us_open_bias_correct_60)
 
+            session_keys = ["market_open", "asia", "london", "ny_open", "ny_session"]
+            session_totals = {k: 0 for k in session_keys}
+            session_correct = {k: 0 for k in session_keys}
+            for item in scored:
+                acc = item["accuracy"]
+                session_map = getattr(acc, "session_accuracy", None) or {}
+                for key in session_keys:
+                    row = session_map.get(key, {}) if isinstance(session_map, dict) else {}
+                    ok = row.get("correct") if isinstance(row, dict) else None
+                    if ok is None:
+                        continue
+                    session_totals[key] += 1
+                    if bool(ok):
+                        session_correct[key] += 1
+
             c1, c2, c3 = st.columns(3)
             with c1:
                 if daily_total:
@@ -351,6 +366,28 @@ def render_history():
                     if missing_saved_days:
                         missing_preview = ", ".join(d.isoformat() for d in missing_saved_days[:5])
                         st.caption(f"Missing saved days: {missing_preview}")
+
+            st.markdown("### Pre-Session Analysis Accuracy By Session")
+            session_name_map = {
+                "market_open": "Market Open",
+                "asia": "Asia",
+                "london": "London",
+                "ny_open": "NY Open",
+                "ny_session": "NY Session",
+            }
+            session_rows = []
+            for key in session_keys:
+                total = session_totals.get(key, 0)
+                correct = session_correct.get(key, 0)
+                accuracy_pct = (correct / total) if total else None
+                session_rows.append(
+                    {
+                        "Session": session_name_map[key],
+                        "Accuracy": f"{accuracy_pct:.0%}" if accuracy_pct is not None else "n/a",
+                        "Correct/Total": f"{correct}/{total}" if total else "0/0",
+                    }
+                )
+            st.dataframe(pd.DataFrame(session_rows), use_container_width=True, hide_index=True)
 
             wrong_rows = []
             for item in scored:
@@ -697,6 +734,9 @@ def render_history():
         st.write("Previous Day Direction: n/a")
         st.write("Previous Day Direction (ATR-adjusted): n/a")
     st.write(f"Daily Bias: {b.daily_bias} ({b.daily_confidence:.0%})")
+    daily_status = "Finalized" if getattr(b, "daily_finalized", None) is True else "Not Finalized"
+    daily_time = getattr(b, "daily_finalized_at", "10:45 ET")
+    st.caption(f"Daily Bias Status: {daily_status} | Finalized Time: {daily_time}")
     us30 = getattr(b, "us_open_bias_30", None) or b.us_open_bias
     us60 = getattr(b, "us_open_bias_60", None) or b.us_open_bias
     us30_conf = getattr(b, "us_open_confidence_30", None)
@@ -706,8 +746,13 @@ def render_history():
     if us60_conf is None:
         us60_conf = b.us_open_confidence
     st.write(f"US Open Bias 30m: {us30} ({us30_conf:.0%})")
+    us30_status = "Finalized" if getattr(b, "us_open_finalized_30", None) is True else "Not Finalized"
+    us30_time = getattr(b, "us_open_finalized_30_at", "10:00 ET")
+    st.caption(f"US Open 30m Status: {us30_status} | Finalized Time: {us30_time}")
     st.write(f"US Open Bias 60m: {us60} ({us60_conf:.0%})")
-    st.caption("Finalized at 09:10 ET using overnight range, gap, VWAP, and premarket trend.")
+    us60_status = "Finalized" if getattr(b, "us_open_finalized_60", None) is True else "Not Finalized"
+    us60_time = getattr(b, "us_open_finalized_60_at", "10:45 ET")
+    st.caption(f"US Open 60m Status: {us60_status} | Finalized Time: {us60_time}")
     if getattr(b, "amd_summary", None):
         st.write(f"AMD: {b.amd_summary}")
     # vwap_comment/news_comment may not exist for older saved objects; guard
@@ -828,6 +873,33 @@ def render_history():
         st.write(f"Used Bias: {getattr(a,'used_bias', 'n/a')}")
         st.write(f"US Open Bias Correct (30m): {getattr(a,'us_open_bias_correct_30', 'n/a')}")
         st.write(f"US Open Bias Correct (60m): {getattr(a,'us_open_bias_correct_60', 'n/a')}")
+        if getattr(a, "close_quality", None):
+            close_pos = getattr(a, "close_position_pct", None)
+            close_text = f"{close_pos:.1f}%" if close_pos is not None else "n/a"
+            st.write(f"Close Quality: {a.close_quality} ({close_text} of range)")
+        session_map = getattr(a, "session_accuracy", None) or {}
+        if isinstance(session_map, dict) and session_map:
+            st.markdown("**Pre-Session Analysis Accuracy**")
+            display_rows = []
+            label_map = {
+                "market_open": "Market Open",
+                "asia": "Asia",
+                "london": "London",
+                "ny_open": "NY Open",
+                "ny_session": "NY Session",
+            }
+            for key in ["market_open", "asia", "london", "ny_open", "ny_session"]:
+                row = session_map.get(key, {}) if isinstance(session_map, dict) else {}
+                display_rows.append(
+                    {
+                        "Session": label_map[key],
+                        "Predicted": row.get("predicted", "n/a"),
+                        "Actual": row.get("actual", "n/a"),
+                        "Correct": row.get("correct", "n/a"),
+                        "Finalized At": row.get("finalized_at", "n/a"),
+                    }
+                )
+            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
         st.info(a.explanation)
     else:
         st.info("Trading day in progress — accuracy will be available after the day ends.")

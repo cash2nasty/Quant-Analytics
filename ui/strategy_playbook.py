@@ -11,7 +11,9 @@ from data.data_fetcher import fetch_intraday_ohlcv
 from engines.patterns import detect_patterns
 from engines.sessions import compute_session_stats
 from engines.strategy_playbook import build_strategy_playbook
+from engines.unified_bias import build_unified_bias
 from engines.zones import build_htf_zones
+from ui.bias_composite import render_unified_bias_panel
 from ui.live_analysis import get_prev_trading_day
 
 
@@ -1476,6 +1478,7 @@ def render_strategy_playbook() -> None:
         whipsaw_threshold=float(whipsaw_threshold),
         trading_day=selected_date,
     )
+
     playbook = _filter_trade_suggestion_rows_for_day(
         playbook,
         start_ts=td_start,
@@ -1548,6 +1551,19 @@ def render_strategy_playbook() -> None:
     c2.metric("NY Mode", f"{decision.get('ny_mode', 'n/a')}")
     c3.metric("NY Direction", f"{decision.get('ny_direction', 'Neutral')}")
     c4.metric("Confidence", f"{100.0 * float(decision.get('confidence', 0.0)):.0f}%")
+
+    unified_payload = build_unified_bias(
+        df_today=df_trading_day if has_today else pd.DataFrame(),
+        df_prev=df_prev_trading_day if has_prev else pd.DataFrame(),
+        trading_date=selected_date,
+        now_et=now_live,
+    )
+
+    render_unified_bias_panel(
+        panel_title="Combined Daily + NY Session/Open Bias",
+        panel_key=f"playbook::{symbol}::{selected_date.isoformat()}",
+        unified_payload=unified_payload,
+    )
 
     if trade_cutoff_active:
         st.warning("No more trades for the day. New trade suggestions are disabled after 16:00 ET.")

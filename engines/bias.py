@@ -631,6 +631,28 @@ def _atr_direction_threshold(
     return float(atr_series.iloc[-1]) * multiplier
 
 
+def _finalization_state_from_df(df_today: pd.DataFrame) -> Dict[str, object]:
+    if df_today is None or df_today.empty or "timestamp" not in df_today.columns:
+        return {
+            "daily_finalized": False,
+            "daily_finalized_at": "10:45 ET",
+            "us_open_finalized_30": False,
+            "us_open_finalized_30_at": "10:00 ET",
+            "us_open_finalized_60": False,
+            "us_open_finalized_60_at": "10:45 ET",
+        }
+    ts = pd.to_datetime(df_today["timestamp"].iloc[-1])
+    t = ts.time()
+    return {
+        "daily_finalized": t >= pd.Timestamp("10:45").time(),
+        "daily_finalized_at": "10:45 ET",
+        "us_open_finalized_30": t >= pd.Timestamp("10:00").time(),
+        "us_open_finalized_30_at": "10:00 ET",
+        "us_open_finalized_60": t >= pd.Timestamp("10:45").time(),
+        "us_open_finalized_60_at": "10:45 ET",
+    }
+
+
 def build_bias(
     df_today: pd.DataFrame,
     df_prev: pd.DataFrame,
@@ -1232,6 +1254,7 @@ def build_bias(
 
     daily_conf = max(0.1, min(0.95, daily_conf))
     us_conf = max(0.1, min(0.95, us_conf))
+    finalization = _finalization_state_from_df(df_today)
 
     return BiasSummary(
         daily_bias=final_bias,
@@ -1250,4 +1273,10 @@ def build_bias(
             if amd_bias in ("Bullish", "Bearish") or london_close_pos != "Unknown"
             else None
         ),
+        daily_finalized=bool(finalization.get("daily_finalized", False)),
+        daily_finalized_at=str(finalization.get("daily_finalized_at", "10:45 ET")),
+        us_open_finalized_30=bool(finalization.get("us_open_finalized_30", False)),
+        us_open_finalized_30_at=str(finalization.get("us_open_finalized_30_at", "10:00 ET")),
+        us_open_finalized_60=bool(finalization.get("us_open_finalized_60", False)),
+        us_open_finalized_60_at=str(finalization.get("us_open_finalized_60_at", "10:45 ET")),
     )
