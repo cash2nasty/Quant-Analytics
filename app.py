@@ -6,12 +6,16 @@ from ui.compare import render_compare
 from ui.settings import render_settings
 from ui.definitions_explanations import render_definitions_explanations
 from ui.strategy_playbook import render_strategy_playbook
+from ui.volume_profile import render_volume_profile_tab
+from ui.market_statistics import render_market_statistics_tab
 
 
 APP_TITLE = "NQ Quant Terminal"
 PAGES = [
     "Live Analysis",
     "Strategy Playbook",
+    "Market Statistics",
+    "Volume Profile",
     "History",
     "Compare Days",
     "Definitions/Explanatinos",
@@ -76,6 +80,10 @@ def main():
         render_live_analysis()
     elif page == "Strategy Playbook":
         render_strategy_playbook()
+    elif page == "Market Statistics":
+        render_market_statistics_tab()
+    elif page == "Volume Profile":
+        render_volume_profile_tab()
     elif page == "History":
         render_history()
     elif page == "Compare Days":

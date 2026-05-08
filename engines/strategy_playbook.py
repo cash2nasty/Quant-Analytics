@@ -2643,6 +2643,7 @@ def _estimate_daily_entry_capacity(
 ) -> Dict[str, object]:
     us_start = windows.get("US", {}).get("start")
     us_end = windows.get("US", {}).get("end")
+    finalize_cutoff = us_end + dt.timedelta(hours=1) if us_end is not None else None
     trade_bucket = _trade_decision_bucket(trade_today)
 
     if trade_bucket == "No":
@@ -2677,21 +2678,21 @@ def _estimate_daily_entry_capacity(
         note = "Pre-US open estimate based on mode, directional alignment, and confluence quality."
         eod_status = "Pending"
         eod_note = "Session is not complete yet."
-    elif us_end and now > us_end:
+    elif finalize_cutoff and now > finalize_cutoff:
         if primary_trigger is None:
             min_e, max_e = 0, 0
             note = "US session has ended without a trigger; no additional entries expected."
             eod_status = "Not Executed"
-            eod_note = "No qualifying trigger was confirmed by session close."
+            eod_note = "No qualifying trigger was confirmed by 17:00 ET close."
         else:
             min_e, max_e = min(min_e, 1), min(max_e, 1)
             note = "US session is largely complete; at most one late opportunity remains."
             eod_status = "Executed"
-            eod_note = "A qualifying trigger fired during session hours."
+            eod_note = "A qualifying trigger fired before the 17:00 ET close."
     else:
         note = "In-session estimate adjusts as trigger state and confluence validity evolve."
         eod_status = "Pending"
-        eod_note = "Waiting for end-of-day session close to finalize execution status."
+        eod_note = "Waiting for 17:00 ET close to finalize execution status."
 
     if confidence >= 0.70:
         likely = min(max(min_e + 1, min_e), max_e)

@@ -23,9 +23,11 @@ from engines.zones import (
     is_zone_failed,
     is_zone_touched,
     is_fvg_inversed,
+    resample_ohlcv,
     score_zone_setup,
     summarize_zone_confluence,
     summarize_zone_outlook,
+    zone_formed_timestamp,
     zone_liquidity_scores,
     zone_size_points,
 )
@@ -587,23 +589,24 @@ def main():
     # Patterns
     patterns = detect_patterns(sessions, df_today if has_today_data else None, df_prev)
     st.markdown("### Structural Patterns")
-    st.write(f"London Breakout: {getattr(patterns,'london_breakout', False)}")
-    st.write(f"Whipsaw: {getattr(patterns,'whipsaw', False)}")
-    trend_label = ""
-    if getattr(patterns, "trend_day", False):
-        trend_label = f" ({trend_day_direction(sessions)})"
-    st.write(f"Trend Day: {getattr(patterns,'trend_day', False)}{trend_label}")
-    st.write(f"Volatility Expansion: {getattr(patterns,'volatility_expansion', False)}")
-    st.write(f"Asia Range Hold: {getattr(patterns,'asia_range_hold', False)}")
-    st.write(f"Asia Range Sweep: {getattr(patterns,'asia_range_sweep', False)} ({getattr(patterns,'asia_range_sweep_bias', 'n/a')})")
-    st.write(f"London Continuation: {getattr(patterns,'london_continuation', False)} ({getattr(patterns,'london_continuation_bias', 'n/a')})")
-    st.write(f"US Open Gap Fill: {getattr(patterns,'us_open_gap_fill', False)} ({getattr(patterns,'us_open_gap_fill_bias', 'n/a')})")
-    st.write(f"ORB 30m: {getattr(patterns,'orb_30', False)} ({getattr(patterns,'orb_30_bias', 'n/a')})")
-    st.write(f"ORB 60m: {getattr(patterns,'orb_60', False)} ({getattr(patterns,'orb_60_bias', 'n/a')})")
-    st.write(f"Failed ORB 30m: {getattr(patterns,'failed_orb_30', False)} ({getattr(patterns,'failed_orb_30_bias', 'n/a')})")
-    st.write(f"Failed ORB 60m: {getattr(patterns,'failed_orb_60', False)} ({getattr(patterns,'failed_orb_60_bias', 'n/a')})")
-    st.write(f"Power Hour Trend: {getattr(patterns,'power_hour_trend', False)} ({getattr(patterns,'power_hour_bias', 'n/a')})")
-    st.write(f"VWAP Reclaim/Reject: {getattr(patterns,'vwap_reclaim_reject', False)} ({getattr(patterns,'vwap_reclaim_reject_bias', 'n/a')})")
+    trend_label = trend_day_direction(sessions) if getattr(patterns, "trend_day", False) else "n/a"
+    pattern_rows = [
+        {"Pattern": "London Breakout", "Active": getattr(patterns, "london_breakout", False), "Bias": "n/a"},
+        {"Pattern": "Whipsaw", "Active": getattr(patterns, "whipsaw", False), "Bias": "n/a"},
+        {"Pattern": "Trend Day", "Active": getattr(patterns, "trend_day", False), "Bias": trend_label},
+        {"Pattern": "Volatility Expansion", "Active": getattr(patterns, "volatility_expansion", False), "Bias": "n/a"},
+        {"Pattern": "Asia Range Hold", "Active": getattr(patterns, "asia_range_hold", False), "Bias": "n/a"},
+        {"Pattern": "Asia Range Sweep", "Active": getattr(patterns, "asia_range_sweep", False), "Bias": getattr(patterns, "asia_range_sweep_bias", "n/a")},
+        {"Pattern": "London Continuation", "Active": getattr(patterns, "london_continuation", False), "Bias": getattr(patterns, "london_continuation_bias", "n/a")},
+        {"Pattern": "US Open Gap Fill", "Active": getattr(patterns, "us_open_gap_fill", False), "Bias": getattr(patterns, "us_open_gap_fill_bias", "n/a")},
+        {"Pattern": "ORB 30m", "Active": getattr(patterns, "orb_30", False), "Bias": getattr(patterns, "orb_30_bias", "n/a")},
+        {"Pattern": "ORB 60m", "Active": getattr(patterns, "orb_60", False), "Bias": getattr(patterns, "orb_60_bias", "n/a")},
+        {"Pattern": "Failed ORB 30m", "Active": getattr(patterns, "failed_orb_30", False), "Bias": getattr(patterns, "failed_orb_30_bias", "n/a")},
+        {"Pattern": "Failed ORB 60m", "Active": getattr(patterns, "failed_orb_60", False), "Bias": getattr(patterns, "failed_orb_60_bias", "n/a")},
+        {"Pattern": "Power Hour Trend", "Active": getattr(patterns, "power_hour_trend", False), "Bias": getattr(patterns, "power_hour_bias", "n/a")},
+        {"Pattern": "VWAP Reclaim/Reject", "Active": getattr(patterns, "vwap_reclaim_reject", False), "Bias": getattr(patterns, "vwap_reclaim_reject_bias", "n/a")},
+    ]
+    st.dataframe(pd.DataFrame(pattern_rows), use_container_width=True, hide_index=True)
     if getattr(patterns, "notes", None):
         st.info(patterns.notes)
 
@@ -629,6 +632,45 @@ def main():
                 trend_bias = "Bearish"
     except Exception:
         trend_bias = "Neutral"
+
+    def _format_ts(ts_val) -> str:
+        if ts_val is None or (isinstance(ts_val, float) and pd.isna(ts_val)):
+            return "n/a"
+        try:
+            return pd.to_datetime(ts_val).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return "n/a"
+
+    def _first_touch_timestamp(df: pd.DataFrame, zone) -> Optional[pd.Timestamp]:
+        if df is None or df.empty:
+            return None
+        formed_ts = zone_formed_timestamp(zone)
+        after = df[df["timestamp"] > formed_ts]
+        if after.empty:
+            return None
+        touched = after[(after["low"] <= zone.high) & (after["high"] >= zone.low)]
+        if touched.empty:
+            return None
+        return pd.to_datetime(touched.iloc[0]["timestamp"])
+
+    def _first_fail_timestamp(df: pd.DataFrame, zone) -> Optional[pd.Timestamp]:
+        if df is None or df.empty:
+            return None
+        rule = {"4H": "4H", "1H": "1H", "30m": "30min", "15m": "15min"}.get(zone.timeframe, "1H")
+        rs = resample_ohlcv(df, rule)
+        if rs.empty:
+            return None
+        formed_ts = zone_formed_timestamp(zone)
+        after = rs[rs["timestamp"] > formed_ts]
+        if after.empty:
+            return None
+        if zone.side == "bullish":
+            failed = after[after["close"] < zone.low]
+        else:
+            failed = after[after["close"] > zone.high]
+        if failed.empty:
+            return None
+        return pd.to_datetime(failed.iloc[0]["timestamp"])
 
     st.markdown("### HTF Zones")
     st.write(
@@ -658,6 +700,7 @@ def main():
         else:
             status = "Untouched"
         density, vol_score = zone_liquidity_scores(df_sessions_source, z)
+        liquidity_score = float(density * 0.2 + vol_score)
         setup_score = score_zone_setup(
             z,
             last_ref_price,
@@ -665,6 +708,9 @@ def main():
             liquidity_density=density,
             volume_score=vol_score,
         )
+        formed_ts = zone_formed_timestamp(z)
+        first_touch_ts = _first_touch_timestamp(df_sessions_source, z)
+        first_fail_ts = _first_fail_timestamp(df_sessions_source, z)
         zone_rows.append(
             {
                 "Kind": z.kind,
@@ -679,8 +725,12 @@ def main():
                 "Inversed": "Yes" if inversed is True else "No" if inversed is False else "n/a",
                 "Liquidity Lines": float(density),
                 "Volume Intensity": float(vol_score),
+                "Liquidity Score": float(liquidity_score),
                 "Setup Score": float(setup_score),
                 "Formed": z.start.strftime("%Y-%m-%d %H:%M"),
+                "Formed TS": formed_ts,
+                "First Touch TS": first_touch_ts,
+                "First Fail TS": first_fail_ts,
             }
         )
 
@@ -691,8 +741,8 @@ def main():
 
     if zone_rows:
         zones_df = pd.DataFrame(zone_rows)
-        st.subheader("HTF Zone Outlook")
-        st.markdown(zone_outlook_summary)
+        st.subheader("HTF Outlook")
+        st.caption("Top liquidity zones and actionable outlook cards with touch/rejection/failure context.")
 
         untouched_df = zones_df[zones_df["Touched"] == "No"].sort_values(
             "Setup Score", ascending=False
@@ -701,11 +751,101 @@ def main():
             "Setup Score", ascending=False
         )
 
-        st.subheader("Untouched HTF Zones")
-        st.dataframe(untouched_df, use_container_width=True)
+        liquidity_sorted = zones_df.sort_values("Liquidity Score", ascending=False)
+        top_liquidity = liquidity_sorted.head(3)
 
-        st.subheader("Touched HTF Zones")
-        st.dataframe(touched_df, use_container_width=True)
+        top_cols = st.columns(3)
+        for i, (_, row) in enumerate(top_liquidity.iterrows()):
+            with top_cols[i]:
+                with st.container(border=True):
+                    st.markdown(f"**Liquidity Zone {i + 1}**")
+                    st.write(f"{row['TF']} {row['Side']} {row['Kind']} | {row['Range']}")
+                    st.markdown(
+                        "\n".join(
+                            [
+                                f"- Status: {row['Status']}",
+                                f"- Liquidity score: {row['Liquidity Score']:.2f}",
+                                f"- Setup score: {row['Setup Score']:.2f}",
+                                f"- Formed: {_format_ts(row['Formed TS'])}",
+                                f"- First touch: {_format_ts(row['First Touch TS'])}",
+                                f"- Expectation: {'Likely reject -> continuation' if row['Status'] in ('Rejecting', 'Untouched') else 'Likely push through -> fail'}",
+                            ]
+                        )
+                    )
+
+        likely_next = untouched_df.sort_values("Setup Score", ascending=False).head(3)
+        rejecting_df = zones_df[
+            (zones_df["Touched"] == "Yes")
+            & (zones_df["Rejection Hits"] > 0)
+            & (zones_df["Failed"] == "No")
+        ].sort_values("Setup Score", ascending=False).head(3)
+        failed_df = zones_df[zones_df["Failed"] == "Yes"].sort_values("Setup Score", ascending=False).head(3)
+
+        c_next, c_reject, c_failed = st.columns(3)
+        with c_next:
+            with st.container(border=True):
+                st.markdown("**Likely Next Touches**")
+                if likely_next.empty:
+                    st.caption("No high-confidence next-touch candidates right now.")
+                else:
+                    for _, row in likely_next.iterrows():
+                        st.write(f"{row['TF']} {row['Side']} {row['Kind']} | {row['Range']}")
+                        st.markdown(
+                            "\n".join(
+                                [
+                                    f"- Reason: untouched + high setup score ({row['Setup Score']:.2f}) + high liquidity ({row['Liquidity Score']:.2f}).",
+                                    "- Look for: sweep into the zone, displacement away, and acceptance back in trend direction.",
+                                    "- Fail condition: close through the far edge of the zone.",
+                                    f"- Formed: {_format_ts(row['Formed TS'])}",
+                                    f"- First touch: {_format_ts(row['First Touch TS'])}",
+                                ]
+                            )
+                        )
+
+        with c_reject:
+            with st.container(border=True):
+                st.markdown("**Rejecting Zones**")
+                if rejecting_df.empty:
+                    st.caption("No active rejecting zones detected.")
+                else:
+                    for _, row in rejecting_df.iterrows():
+                        st.write(f"{row['TF']} {row['Side']} {row['Kind']} | {row['Range']}")
+                        st.markdown(
+                            "\n".join(
+                                [
+                                    f"- Reason: {int(row['Rejection Hits'])} rejection hit(s) with no failure close-through yet.",
+                                    "- Look for: repeated wick rejections and closes away from the zone boundary.",
+                                    "- Trading implication: favors continuation away from this zone until invalidated.",
+                                    f"- Formed: {_format_ts(row['Formed TS'])}",
+                                    f"- First touch: {_format_ts(row['First Touch TS'])}",
+                                ]
+                            )
+                        )
+
+        with c_failed:
+            with st.container(border=True):
+                st.markdown("**Failed Zones**")
+                if failed_df.empty:
+                    st.caption("No failed zones detected.")
+                else:
+                    for _, row in failed_df.iterrows():
+                        st.write(f"{row['TF']} {row['Side']} {row['Kind']} | {row['Range']}")
+                        st.markdown(
+                            "\n".join(
+                                [
+                                    "- Reason: close moved through the far edge of the zone (invalidation).",
+                                    "- Trading implication: prior support/resistance expectation is no longer reliable.",
+                                    f"- Failed at: {_format_ts(row['First Fail TS'])}",
+                                    f"- Formed: {_format_ts(row['Formed TS'])}",
+                                ]
+                            )
+                        )
+
+        with st.expander("Untouched Zones", expanded=False):
+            st.dataframe(untouched_df, use_container_width=True)
+
+        with st.expander("Touched HTF Zones", expanded=False):
+            st.dataframe(touched_df, use_container_width=True)
 
         if trend_bias == "Bullish":
             retracement = zones_df[zones_df["Side"] == "bearish"]
@@ -717,24 +857,19 @@ def main():
             retracement = zones_df
             continuation = zones_df
 
-        st.subheader("Top Retracement Zones")
-        st.caption(f"Trend context: {trend_bias}. Retracement zones oppose the trend.")
-        st.dataframe(retracement.sort_values("Setup Score", ascending=False).head(6), use_container_width=True)
+        with st.expander("Top Retracement Zones", expanded=False):
+            st.caption(f"Trend context: {trend_bias}. Retracement zones oppose the trend.")
+            st.dataframe(retracement.sort_values("Setup Score", ascending=False).head(6), use_container_width=True)
 
-        st.subheader("Top Continuation Zones")
-        st.caption(f"Trend context: {trend_bias}. Continuation zones align with the trend.")
-        st.dataframe(continuation.sort_values("Setup Score", ascending=False).head(6), use_container_width=True)
+        with st.expander("Top Continuation Zones", expanded=False):
+            st.caption(f"Trend context: {trend_bias}. Continuation zones align with the trend.")
+            st.dataframe(continuation.sort_values("Setup Score", ascending=False).head(6), use_container_width=True)
 
-        st.subheader("Highest Liquidity Zones")
-        st.caption(
-            "Liquidity lines show where prior highs/lows cluster; volume intensity shows where more trading occurred."
-        )
-        liquidity_sorted = zones_df.copy()
-        liquidity_sorted["Liquidity Score"] = (
-            liquidity_sorted["Liquidity Lines"] * 0.2
-            + liquidity_sorted["Volume Intensity"]
-        )
-        st.dataframe(liquidity_sorted.sort_values("Liquidity Score", ascending=False).head(6), use_container_width=True)
+        with st.expander("Highest Liquidity Zones", expanded=False):
+            st.caption(
+                "Liquidity lines show where prior highs/lows cluster; volume intensity shows where more trading occurred."
+            )
+            st.dataframe(liquidity_sorted.head(6), use_container_width=True)
     else:
         st.info("No HTF zones detected yet.")
 
@@ -752,7 +887,12 @@ def main():
     else:
         bias = build_preview_bias(df_prev, sessions, prev_sessions, zone_confluence=zone_confluence)
     st.markdown("### Bias")
-    st.write(f"Daily Bias: {getattr(bias,'daily_bias', 'n/a')} ({getattr(bias,'daily_confidence', 0):.0%})")
+    daily_bias = getattr(bias, "daily_bias", "n/a")
+    daily_conf = float(getattr(bias, "daily_confidence", 0) or 0)
+    st.write(
+        f"Daily Bias: {daily_bias} ({daily_conf:.0%}). "
+        f"Meaning for today: directional setups aligned with {str(daily_bias).lower()} have higher odds unless intraday structure invalidates this stance."
+    )
     us_30 = getattr(bias, "us_open_bias_30", None) or getattr(bias, "us_open_bias", "n/a")
     us_60 = getattr(bias, "us_open_bias_60", None) or getattr(bias, "us_open_bias", "n/a")
     us_30_conf = getattr(bias, "us_open_confidence_30", None)
@@ -761,18 +901,83 @@ def main():
         us_30_conf = getattr(bias, "us_open_confidence", 0)
     if us_60_conf is None:
         us_60_conf = getattr(bias, "us_open_confidence", 0)
-    st.write(f"US Open Bias 30m: {us_30} ({us_30_conf:.0%})")
-    st.write(f"US Open Bias 60m: {us_60} ({us_60_conf:.0%})")
+    st.write(
+        f"US Open Bias 30m: {us_30} ({us_30_conf:.0%}). "
+        "Meaning for today: this frames the opening impulse, so early continuation/reversal setups should be judged against this first 30-minute read."
+    )
+    st.write(
+        f"US Open Bias 60m: {us_60} ({us_60_conf:.0%}). "
+        "Meaning for today: this is the stronger opening confirmation; alignment with it supports holding directional conviction into mid-session."
+    )
     st.caption("Finalized at 09:10 ET using overnight range, gap, VWAP, and premarket trend.")
-    st.write(f"VWAP Posture: {getattr(bias,'vwap_comment', '')}")
-    st.write(f"News Effect: {getattr(bias,'news_comment', '')}")
+    vwap_comment = getattr(bias, "vwap_comment", "")
+    st.write(
+        f"VWAP Posture: {vwap_comment}. "
+        "Meaning for today: acceptance above VWAP references favors buy-side continuation, while acceptance below favors sell-side continuation and fade risk for opposite-direction entries."
+    )
+    st.caption(
+        "VWAP posture context: daily VWAP reflects current session fair value, weekly VWAP reflects higher-timeframe fair value. "
+        "Confluence improves when price holds on the same side of both and open/acceptance agree."
+    )
+    news_comment = getattr(bias, "news_comment", "")
+    st.write(
+        f"News Effect: {news_comment}. "
+        "Meaning for today: higher-impact event context can increase volatility and regime shifts, so risk sizing and target expectations should adapt accordingly."
+    )
     if getattr(bias, "amd_summary", None):
-        st.write(f"AMD: {bias.amd_summary}")
+        st.write(
+            f"AMD: {bias.amd_summary}. "
+            "Meaning for today: this suggests where the session likely is in the accumulation-manipulation-distribution sequence and helps time continuation vs reversal expectations."
+        )
     if getattr(bias, "explanation", None):
-        st.info(bias.explanation)
-    if zone_rows:
-        st.markdown("**HTF Zone Outlook**")
-        st.markdown(zone_outlook_summary)
+        st.info(
+            f"{bias.explanation} Meaning for today: treat this as the model's consolidated playbook context for prioritizing setups and filtering lower-quality trades."
+        )
+    with st.expander("Daily Bias Summary Details", expanded=True):
+        detail_rows = [
+            {
+                "Component": "Daily Bias",
+                "Reading": f"{daily_bias} ({daily_conf:.0%})",
+                "How to interpret": "Session-weighted directional stance for the trading day.",
+            },
+            {
+                "Component": "US Open Bias 30m",
+                "Reading": f"{us_30} ({us_30_conf:.0%})",
+                "How to interpret": "Opening impulse bias from first 30 minutes after US open.",
+            },
+            {
+                "Component": "US Open Bias 60m",
+                "Reading": f"{us_60} ({us_60_conf:.0%})",
+                "How to interpret": "Confirmation bias from first 60 minutes after US open.",
+            },
+            {
+                "Component": "VWAP Posture",
+                "Reading": vwap_comment or "n/a",
+                "How to interpret": "Shows whether price is accepting above/below fair value references (daily/weekly VWAP).",
+            },
+            {
+                "Component": "News Effect",
+                "Reading": getattr(bias, "news_comment", ""),
+                "How to interpret": "Macro/event context modifier that can increase or reduce directional conviction.",
+            },
+        ]
+        if getattr(bias, "amd_summary", None):
+            detail_rows.append(
+                {
+                    "Component": "AMD Context",
+                    "Reading": bias.amd_summary,
+                    "How to interpret": "Describes accumulation/manipulation/distribution phase alignment with the bias.",
+                }
+            )
+        if getattr(bias, "explanation", None):
+            detail_rows.append(
+                {
+                    "Component": "Bias Explanation",
+                    "Reading": bias.explanation,
+                    "How to interpret": "Full model rationale summarizing how evidence was weighted.",
+                }
+            )
+        st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
 
     location = prior_day_range_location(df_today, df_prev) if has_today_data else None
     if location is not None:

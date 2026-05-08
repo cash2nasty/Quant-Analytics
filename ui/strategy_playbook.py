@@ -44,6 +44,13 @@ def _trading_day_bounds(trading_day: dt.date) -> tuple[pd.Timestamp, pd.Timestam
     return start, end
 
 
+def _is_after_trade_cutoff(ts: pd.Timestamp | None) -> bool:
+    if ts is None:
+        return False
+    t = ts.time()
+    return dt.time(16, 0) <= t < dt.time(18, 0)
+
+
 def _slice_trading_day(df: pd.DataFrame, trading_day: dt.date) -> pd.DataFrame:
     if df is None or df.empty or "timestamp" not in df.columns:
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -52,6 +59,38 @@ def _slice_trading_day(df: pd.DataFrame, trading_day: dt.date) -> pd.DataFrame:
     out["timestamp"] = pd.to_datetime(out["timestamp"])
     mask = (out["timestamp"] >= start) & (out["timestamp"] <= end)
     return out.loc[mask].sort_values("timestamp").reset_index(drop=True)
+
+
+def _row_in_suggestion_window(
+    row: Dict[str, Any],
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+) -> bool:
+    suggested_raw = row.get("Suggested Time")
+    suggested_ts = pd.to_datetime(suggested_raw, errors="coerce")
+    if pd.isna(suggested_ts):
+        return False
+    return bool(start_ts <= suggested_ts <= end_ts)
+
+
+def _filter_trade_suggestion_rows_for_day(
+    playbook: Dict[str, Any],
+    start_ts: pd.Timestamp,
+    end_ts: pd.Timestamp,
+) -> Dict[str, Any]:
+    out = dict(playbook)
+
+    style_rows = playbook.get("confluence_entry_styles", []) or []
+    out["confluence_entry_styles"] = [
+        r for r in style_rows if _row_in_suggestion_window(r, start_ts, end_ts)
+    ]
+
+    exec_rows = playbook.get("entry_execution_tracker", []) or []
+    out["entry_execution_tracker"] = [
+        r for r in exec_rows if _row_in_suggestion_window(r, start_ts, end_ts)
+    ]
+
+    return out
 
 
 def _parse_hhmm(value: str) -> tuple[dt.time | None, str | None]:
@@ -125,6 +164,8 @@ def _build_top_unfilled_trade_picks(
     playbook: Dict[str, Any],
     asof_ts: pd.Timestamp | None = None,
     suggested_at_app_time: str | None = None,
+    suggestion_start_ts: pd.Timestamp | None = None,
+    suggestion_end_ts: pd.Timestamp | None = None,
 ) -> Dict[str, Any]:
     execution_rows = playbook.get("entry_execution_tracker", []) or []
     confluences = playbook.get("confluences", []) or []
@@ -153,6 +194,15 @@ def _build_top_unfilled_trade_picks(
             suggested_time = pd.to_datetime(row.get("Suggested Time", ""), errors="coerce")
             if pd.notna(suggested_time) and suggested_time > asof_ts:
                 continue
+        else:
+            suggested_time = pd.to_datetime(row.get("Suggested Time", ""), errors="coerce")
+
+        if pd.isna(suggested_time):
+            continue
+        if suggestion_start_ts is not None and suggested_time < suggestion_start_ts:
+            continue
+        if suggestion_end_ts is not None and suggested_time > suggestion_end_ts:
+            continue
 
         rr = _to_float(row.get("RR", 0.0), 0.0)
         conf = _to_float(row.get("Entry Confidence", 0.0), 0.0)
@@ -248,7 +298,6 @@ def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
     targets = playbook.get("targets", []) or []
     vwap_levels = playbook.get("vwap_levels", []) or []
     power_hour = playbook.get("power_hour", {}) or {}
-    open_watch = playbook.get("open_pattern_watch", {}) or {}
     risk_engine = playbook.get("risk_engine", {}) or {}
     vwap_probs = playbook.get("vwap_probabilities", {}) or {}
     momentum = playbook.get("momentum_prediction", {}) or {}
@@ -332,11 +381,6 @@ def _build_daily_summary(playbook: dict) -> tuple[str, list[str]]:
     if power_hour:
         bullets.append(
             f"Power hour plan: focus {power_hour.get('focus', 'No')}, bias {power_hour.get('bias', 'Neutral')} — {power_hour.get('reason', 'n/a')}"
-        )
-
-    if open_watch:
-        bullets.append(
-            f"US Open Pattern Watch: {open_watch.get('status', 'Not Active')} ({float(open_watch.get('confidence', 0.0)):.0f}% confidence) — {open_watch.get('reason', 'n/a')}"
         )
 
     if risk_engine:
@@ -1321,6 +1365,7 @@ def render_strategy_playbook() -> None:
     has_prev = df_prev_trading_day is not None and not df_prev_trading_day.empty
 
     td_start, td_end = _trading_day_bounds(selected_date)
+    td_suggestion_end = pd.Timestamp.combine(selected_date, dt.time(16, 0))
 
     st.caption(f"Data source ticker: {used_ticker or symbol}")
     st.caption(
@@ -1368,17 +1413,29 @@ def render_strategy_playbook() -> None:
             st.info(f"Time-travel active: showing page state as of {asof_ts.strftime('%Y-%m-%d %H:%M')} ET.")
 
     now_live = _now_et()
+    cutoff_reference_ts: pd.Timestamp | None = None
+    if view_mode == "Time Travel":
+        cutoff_reference_ts = asof_ts
+    elif selected_date == today:
+        cutoff_reference_ts = pd.Timestamp(now_live)
+    trade_cutoff_active = _is_after_trade_cutoff(cutoff_reference_ts)
+
     top_picks_active = False
     top_picks_status = ""
     if view_mode == "Time Travel":
         if asof_ts is not None and asof_error is None:
-            top_picks_active = True
-            top_picks_status = f"Top picks active for Time Travel as-of {asof_ts.strftime('%Y-%m-%d %H:%M')} ET."
+            if trade_cutoff_active:
+                top_picks_status = "No more trades for the day (after 16:00 ET cutoff)."
+            else:
+                top_picks_active = True
+                top_picks_status = f"Top picks active for Time Travel as-of {asof_ts.strftime('%Y-%m-%d %H:%M')} ET."
         else:
             top_picks_status = "Top picks are inactive until a valid Time Travel as-of time is set."
     else:
         if selected_date != today:
             top_picks_status = "Top picks are inactive for ended historical trading days in Live mode."
+        elif trade_cutoff_active:
+            top_picks_status = "No more trades for the day (after 16:00 ET cutoff)."
         elif td_start <= pd.Timestamp(now_live) <= td_end:
             top_picks_active = True
             top_picks_status = "Top picks active for the current live trading day."
@@ -1419,12 +1476,19 @@ def render_strategy_playbook() -> None:
         whipsaw_threshold=float(whipsaw_threshold),
         trading_day=selected_date,
     )
+    playbook = _filter_trade_suggestion_rows_for_day(
+        playbook,
+        start_ts=td_start,
+        end_ts=td_suggestion_end,
+    )
     app_suggested_at = pd.Timestamp(run_now).strftime("%Y-%m-%d %H:%M")
     if top_picks_active:
         playbook["top_trade_picks"] = _build_top_unfilled_trade_picks(
             playbook,
             asof_ts=asof_ts,
             suggested_at_app_time=app_suggested_at,
+            suggestion_start_ts=td_start,
+            suggestion_end_ts=td_suggestion_end,
         )
         playbook["top_trade_picks"]["active"] = True
         playbook["top_trade_picks"]["status"] = top_picks_status
@@ -1477,10 +1541,16 @@ def render_strategy_playbook() -> None:
 
     st.markdown("### Trade Decision")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Trade Today", f"{_status_color(decision.get('trade_today', 'Wait'))} {decision.get('trade_today', 'Wait')}")
+    if trade_cutoff_active:
+        c1.metric("Trade Today", "No more trades for day")
+    else:
+        c1.metric("Trade Today", f"{_status_color(decision.get('trade_today', 'Wait'))} {decision.get('trade_today', 'Wait')}")
     c2.metric("NY Mode", f"{decision.get('ny_mode', 'n/a')}")
     c3.metric("NY Direction", f"{decision.get('ny_direction', 'Neutral')}")
     c4.metric("Confidence", f"{100.0 * float(decision.get('confidence', 0.0)):.0f}%")
+
+    if trade_cutoff_active:
+        st.warning("No more trades for the day. New trade suggestions are disabled after 16:00 ET.")
 
     st.info(decision.get("primary_reason", "No reason available."))
     wait_for = decision.get("wait_for_confirmations", []) or []
@@ -1513,24 +1583,27 @@ def render_strategy_playbook() -> None:
 
     st.markdown("### Trigger Report")
     primary_trigger = playbook.get("primary_trigger")
-    if primary_trigger:
-        st.success(
-            f"Primary Trigger: {primary_trigger.get('name')} | {primary_trigger.get('direction')} | "
-            f"{primary_trigger.get('time')} @ {primary_trigger.get('price'):.2f} | TF {primary_trigger.get('timeframe')}"
-        )
-        st.caption("Monitoring remains active for OR and bias-confirmation triggers even after this trigger fired.")
-        st.caption("ORB triggers are evaluated from current-day OR windows only (post 10:00 / 10:30 ET).")
-        st.caption(primary_trigger.get("details", ""))
-        st.markdown("**What happened**")
-        st.write(f"- {primary_trigger.get('what_happened', 'n/a')}")
-        st.markdown("**What must happen next for execution**")
-        st.write(f"- {primary_trigger.get('must_happen', 'n/a')}")
-        st.markdown("**Execution look-for**")
-        st.write(f"- {primary_trigger.get('execution_look_for', 'n/a')}")
-        st.markdown("**Invalidation**")
-        st.write(f"- {primary_trigger.get('invalidation', 'n/a')}")
+    if trade_cutoff_active:
+        st.info("No more trades for the day.")
     else:
-        st.warning("No qualified trigger has fired yet.")
+        if primary_trigger:
+            st.success(
+                f"Primary Trigger: {primary_trigger.get('name')} | {primary_trigger.get('direction')} | "
+                f"{primary_trigger.get('time')} @ {primary_trigger.get('price'):.2f} | TF {primary_trigger.get('timeframe')}"
+            )
+            st.caption("Monitoring remains active for OR and bias-confirmation triggers even after this trigger fired.")
+            st.caption("ORB triggers are evaluated from current-day OR windows only (post 10:00 / 10:30 ET).")
+            st.caption(primary_trigger.get("details", ""))
+            st.markdown("**What happened**")
+            st.write(f"- {primary_trigger.get('what_happened', 'n/a')}")
+            st.markdown("**What must happen next for execution**")
+            st.write(f"- {primary_trigger.get('must_happen', 'n/a')}")
+            st.markdown("**Execution look-for**")
+            st.write(f"- {primary_trigger.get('execution_look_for', 'n/a')}")
+            st.markdown("**Invalidation**")
+            st.write(f"- {primary_trigger.get('invalidation', 'n/a')}")
+        else:
+            st.warning("No qualified trigger has fired yet.")
 
     triggers = playbook.get("triggers", [])
     if triggers:
@@ -1546,77 +1619,20 @@ def render_strategy_playbook() -> None:
         st.markdown("**Trigger Watchlist (Continuous Monitoring)**")
         st.dataframe(pd.DataFrame(watchlist), use_container_width=True)
 
-    st.markdown("### US Open Pattern Watch")
-    open_watch = playbook.get("open_pattern_watch", {}) or {}
-    status = str(open_watch.get("status", "Not Active"))
-    confidence = float(open_watch.get("confidence", 0.0))
-    st.write(f"- Status: {_status_color(status)} {status}")
-    st.write(f"- Confidence: {confidence:.0f}%")
-    st.write(f"- Reason: {open_watch.get('reason', 'n/a')}")
-
-    checklist = open_watch.get("checklist", []) or []
-    if checklist:
-        st.markdown("**Checklist**")
-        for item in checklist:
-            st.write(f"- {item}")
-
-    anticipation = open_watch.get("anticipation_factors", []) or []
-    if anticipation:
-        st.markdown("**Anticipation factors**")
-        for item in anticipation:
-            st.write(f"- {item}")
-
-    provisional_plan = open_watch.get("provisional_plan", {}) or {}
-    if provisional_plan:
-        st.markdown("**Provisional plan**")
-        st.write(f"- Entry rule: {provisional_plan.get('entry_rule', 'n/a')}")
-        st.write(f"- Stop rule: {provisional_plan.get('stop_rule', 'n/a')}")
-        st.write(f"- Target rule: {provisional_plan.get('target_rule', 'n/a')}")
-
-    score_breakdown = open_watch.get("score_breakdown", []) or []
-    if score_breakdown:
-        st.markdown("**Confidence model**")
-        settings = open_watch.get("model_settings", {}) or {}
-        if settings:
-            st.caption(
-                f"Settings: strictness={settings.get('candle3_strictness', 'balanced')} | "
-                f"reclaim_window={float(settings.get('reclaim_speed_window_minutes', 30.0)):.0f}m"
-            )
-        score_df = pd.DataFrame(score_breakdown)
-        preferred = ["component", "score", "max", "note"]
-        cols = [c for c in preferred if c in score_df.columns] + [c for c in score_df.columns if c not in preferred]
-        st.dataframe(score_df[cols], use_container_width=True)
-        penalty = float(open_watch.get("penalty_points", 0.0))
-        if penalty > 0:
-            st.caption(f"Penalty applied: -{penalty:.1f} points")
-
-    if status in {"Armed", "Triggered"}:
-        entry = open_watch.get("entry")
-        stop = open_watch.get("stop")
-        targets = open_watch.get("targets", []) or []
-        if entry:
-            st.write(f"- Entry: {entry.get('time', 'n/a')} @ {_fmt_price(entry.get('price'))}")
-        if stop:
-            st.write(f"- Stop: {_fmt_price(stop.get('price'))} ({stop.get('rule', 'n/a')})")
-        if targets:
-            st.markdown("**Targets**")
-            for t in targets[:2]:
-                st.write(
-                    f"- {t.get('name', 'Target')}: {_fmt_price(t.get('price'))} "
-                    f"(R:R {float(t.get('rr', 0.0)):.2f})"
-                )
-        st.caption(f"Invalidation: {open_watch.get('invalidation', 'n/a')}")
-
     st.markdown("### Entry Playbooks (If/Then)")
     blueprints = playbook.get("entry_blueprints", [])
-    if blueprints:
+    if trade_cutoff_active:
+        st.info("No more trades for the day.")
+    elif blueprints:
         st.dataframe(pd.DataFrame(blueprints), use_container_width=True)
     else:
         st.write("No entry playbooks available for current state.")
 
     st.markdown("### Confluence Entry Style Suggestions")
     style_rows = playbook.get("confluence_entry_styles", []) or []
-    if style_rows:
+    if trade_cutoff_active:
+        st.info("No more trades for the day.")
+    elif style_rows:
         style_df = pd.DataFrame(style_rows)
         if "Suggested App Time" not in style_df.columns and "Suggested Time" in style_df.columns:
             style_df["Suggested App Time"] = style_df["Suggested Time"]
@@ -1717,12 +1733,14 @@ def render_strategy_playbook() -> None:
                 )
                 st.caption(str(row.get("Confidence Reasoning", "n/a")))
                 st.caption(str(row.get("Entry ETA Detail", "n/a")))
-    else:
+    elif not trade_cutoff_active:
         st.write("No confluence entry style suggestions available.")
 
     st.markdown("### Entry Execution Tracker")
     execution_rows = playbook.get("entry_execution_tracker", []) or []
-    if execution_rows:
+    if trade_cutoff_active:
+        st.info("No more trades for the day.")
+    elif execution_rows:
         exec_df = pd.DataFrame(execution_rows)
         if "Suggested App Time" not in exec_df.columns and "Suggested Time" in exec_df.columns:
             exec_df["Suggested App Time"] = exec_df["Suggested Time"]
@@ -1811,7 +1829,7 @@ def render_strategy_playbook() -> None:
                 )
                 st.caption(str(row.get("Confidence Reasoning", row.get("Why", "n/a"))))
                 st.caption(str(row.get("Entry ETA Detail", "n/a")))
-    else:
+    elif not trade_cutoff_active:
         st.write("No execution records available yet.")
 
     st.markdown("### Top 2 Unfilled Trade Picks")
@@ -1822,7 +1840,9 @@ def render_strategy_playbook() -> None:
         st.caption(top_picks_status)
     top_rows = top_picks.get("rows", []) or []
     top_detailed = top_picks.get("detailed_rows", []) or []
-    if top_picks_active and top_rows:
+    if trade_cutoff_active:
+        st.info("No more trades for the day.")
+    elif top_picks_active and top_rows:
         st.dataframe(pd.DataFrame(top_rows), use_container_width=True)
         st.markdown("**Why These Trades Were Chosen**")
         for row in top_detailed:
@@ -1841,6 +1861,9 @@ def render_strategy_playbook() -> None:
         st.write("Top picks are currently disabled for this view.")
 
     st.markdown("### Risk Engine")
+    if trade_cutoff_active:
+        st.info("No more trades for the day.")
+        return
     risk_engine = playbook.get("risk_engine", {}) or {}
     trade_rows = playbook.get("entry_execution_tracker", []) or []
     trade_options: list[tuple[str, dict]] = []
