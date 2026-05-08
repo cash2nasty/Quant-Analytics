@@ -70,12 +70,6 @@ def main():
         if query_page != page:
             _set_query_page(page)
 
-        st.markdown("---")
-        st.subheader("External")
-        import webbrowser
-        if st.button("Open TopstepX"):
-            webbrowser.open("https://topstepx.com")
-
     if page == "Live Analysis":
         render_live_analysis()
     elif page == "Strategy Playbook":
