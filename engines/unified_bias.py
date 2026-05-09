@@ -13,6 +13,7 @@ from indicators.moving_averages import compute_daily_vwap
 from indicators.momentum import roc
 from indicators.statistics import zscore
 from indicators.volatility import atr_like
+from engines.probability import bias_probabilities
 
 
 def _prepare_df(df: Optional[pd.DataFrame]) -> pd.DataFrame:
@@ -278,6 +279,16 @@ def build_unified_bias(
 
     daily_blend = _blend(daily_components)
     ny_open_blend = _blend(ny_open_components)
+    daily_bull, daily_bear = bias_probabilities(
+        str(daily_blend.get("bias", "Neutral")),
+        float(daily_blend.get("confidence", 0.0) or 0.0),
+        float(daily_blend.get("score", 0.0) or 0.0),
+    )
+    ny_bull, ny_bear = bias_probabilities(
+        str(ny_open_blend.get("bias", "Neutral")),
+        float(ny_open_blend.get("confidence", 0.0) or 0.0),
+        float(ny_open_blend.get("score", 0.0) or 0.0),
+    )
 
     daily_reasoning = (
         f"Unified daily reasoning blends Live Analysis (daily bias {getattr(live_bias, 'daily_bias', 'Neutral')} at "
@@ -303,6 +314,8 @@ def build_unified_bias(
             "tone": str(daily_blend.get("tone", "Balanced")),
             "expected": _expected_behavior(str(daily_blend.get("bias", "Neutral")), "Daily"),
             "reasoning": daily_reasoning,
+            "prob_bullish": daily_bull,
+            "prob_bearish": daily_bear,
             "finalized": daily_finalized,
             "finalized_at": "10:45 ET",
         },
@@ -313,6 +326,8 @@ def build_unified_bias(
             "tone": str(ny_open_blend.get("tone", "Balanced")),
             "expected": _expected_behavior(str(ny_open_blend.get("bias", "Neutral")), "NY Open"),
             "reasoning": ny_open_reasoning,
+            "prob_bullish": ny_bull,
+            "prob_bearish": ny_bear,
             "finalized": ny_open_finalized,
             "finalized_at": "09:15 ET",
         },

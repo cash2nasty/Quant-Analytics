@@ -4,6 +4,7 @@ from typing import Optional
 
 from storage.history_manager import AccuracySummary, BiasSummary
 from data.session_reference import get_session_windows_for_date
+from engines.probability import bias_probabilities
 
 
 def _slice_trading_day(df: pd.DataFrame, trading_date: Optional[dt.date]) -> pd.DataFrame:
@@ -146,27 +147,63 @@ def _session_accuracy_map(
         else daily
     )
 
-    def _row(predicted: str, actual: str, finalized_at: str) -> dict:
+    market_open_conf = max(0.35, min(0.90, float(getattr(bias, "daily_confidence", 0.5) or 0.5) * 0.75))
+    asia_conf = market_open_conf
+    london_conf = market_open_conf
+    ny_open_conf = float(
+        getattr(bias, "us_open_confidence_30", None)
+        if getattr(bias, "us_open_confidence_30", None) is not None
+        else getattr(bias, "us_open_confidence", 0.5)
+    )
+    ny_open_conf = max(0.0, min(1.0, ny_open_conf))
+    ny_session_conf = float(
+        getattr(bias, "us_open_confidence_60", None)
+        if getattr(bias, "us_open_confidence_60", None) is not None
+        else getattr(bias, "daily_confidence", 0.5)
+    )
+    ny_session_conf = max(0.0, min(1.0, ny_session_conf))
+
+    def _row(predicted: str, actual: str, finalized_at: str, confidence: float) -> dict:
+        bull_prob, bear_prob = bias_probabilities(predicted, confidence)
+        if abs(bull_prob - bear_prob) < 0.01:
+            favored_side = "Neutral"
+        else:
+            favored_side = "Bullish" if bull_prob > bear_prob else "Bearish"
+
+        favorability_correct = None
+        if favored_side in ("Bullish", "Bearish") and actual in ("Bullish", "Bearish"):
+            favorability_correct = favored_side == actual
+
         if predicted not in ("Bullish", "Bearish"):
             return {
                 "predicted": predicted,
                 "actual": actual,
                 "correct": None,
+                "confidence": confidence,
+                "prob_bullish": bull_prob,
+                "prob_bearish": bear_prob,
+                "favored_side": favored_side,
+                "favorability_correct": favorability_correct,
                 "finalized_at": finalized_at,
             }
         return {
             "predicted": predicted,
             "actual": actual,
             "correct": predicted == actual,
+            "confidence": confidence,
+            "prob_bullish": bull_prob,
+            "prob_bearish": bear_prob,
+            "favored_side": favored_side,
+            "favorability_correct": favorability_correct,
             "finalized_at": finalized_at,
         }
 
     return {
-        "market_open": _row(market_open_pred, _actual_direction_from_window(market_open_df), "17:30 ET"),
-        "asia": _row(asia_pred, _actual_direction_from_window(asia_df), "Asia +15m ET"),
-        "london": _row(london_pred, _actual_direction_from_window(london_df), "London +15m ET"),
-        "ny_open": _row(ny_open_pred, _actual_direction_from_window(ny_open_df), "09:15 ET"),
-        "ny_session": _row(ny_session_pred, _actual_direction_from_window(ny_df), "10:45 ET"),
+        "market_open": _row(market_open_pred, _actual_direction_from_window(market_open_df), "17:30 ET", market_open_conf),
+        "asia": _row(asia_pred, _actual_direction_from_window(asia_df), "Asia +15m ET", asia_conf),
+        "london": _row(london_pred, _actual_direction_from_window(london_df), "London +15m ET", london_conf),
+        "ny_open": _row(ny_open_pred, _actual_direction_from_window(ny_open_df), "09:15 ET", ny_open_conf),
+        "ny_session": _row(ny_session_pred, _actual_direction_from_window(ny_df), "10:45 ET", ny_session_conf),
     }
 
 

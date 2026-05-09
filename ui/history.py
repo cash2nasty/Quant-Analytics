@@ -9,6 +9,7 @@ from data.data_fetcher import fetch_intraday_ohlcv, filter_date
 from engines.sessions import compute_session_stats
 from engines.patterns import detect_patterns
 from engines.bias import build_bias, analyze_vwap_posture, anchored_vwap_anchor_times, build_anchored_vwap_rows
+from engines.probability import bias_probabilities
 from engines.structure import detect_market_structure
 from engines.accuracy import evaluate_bias_accuracy
 from engines.zones import build_htf_zones, summarize_zone_confluence, summarize_zone_outlook, resample_ohlcv
@@ -182,11 +183,27 @@ def render_history():
     # Allow user to pick symbol and date to view historical analysis
     symbol = st.text_input("Symbol", value="NQH26", help="Futures symbol to analyze")
     today = dt.datetime.now().date()
-    selected_date = st.date_input("Select date to view", value=today)
 
     # First try to load saved summary if it exists
     summaries = load_all_summaries()
     symbol_summaries = [s for s in summaries if s.symbol == symbol]
+    provider_min = today - dt.timedelta(days=59)
+    saved_min = min((dt.date.fromisoformat(s.date) for s in symbol_summaries), default=today)
+    saved_max = max((dt.date.fromisoformat(s.date) for s in symbol_summaries), default=today)
+    view_min = min(provider_min, saved_min)
+    view_max = max(today, saved_max)
+    default_view_date = min(max(today, view_min), view_max)
+    selected_date = st.date_input(
+        "Select date to view",
+        value=default_view_date,
+        min_value=view_min,
+        max_value=view_max,
+    )
+    st.caption(
+        f"Viewable history interval: {view_min.isoformat()} to {view_max.isoformat()} "
+        "(provider window plus saved history)."
+    )
+
     if symbol_summaries:
         earliest = min(dt.date.fromisoformat(s.date) for s in symbol_summaries)
         latest = max(dt.date.fromisoformat(s.date) for s in symbol_summaries)
@@ -195,9 +212,9 @@ def render_history():
         st.caption("Recompute uses raw data even if the day was never saved.")
         c_start, c_end = st.columns(2)
         with c_start:
-            start_date = st.date_input("Start date", value=earliest)
+            start_date = st.date_input("Start date", value=earliest, min_value=view_min, max_value=view_max)
         with c_end:
-            end_date = st.date_input("End date", value=latest)
+            end_date = st.date_input("End date", value=latest, min_value=view_min, max_value=view_max)
         use_recompute = st.checkbox("Recompute from raw data", value=True)
         if start_date > end_date:
             st.warning("Start date must be on or before end date.")
@@ -308,6 +325,26 @@ def render_history():
                     excluded_60.append((item["date"], reason))
             daily_total = len(acc_list)
             daily_correct = sum(1 for a in acc_list if a.bias_correct)
+
+            daily_prob_total = 0
+            daily_prob_correct = 0
+            for item in scored:
+                acc = item["accuracy"]
+                bias = item["bias"]
+                bull_p, bear_p = bias_probabilities(
+                    getattr(bias, "daily_bias", "Neutral"),
+                    float(getattr(bias, "daily_confidence", 0.0) or 0.0),
+                )
+                if abs(bull_p - bear_p) < 0.01:
+                    continue
+                favored = "Bullish" if bull_p > bear_p else "Bearish"
+                actual_dir = getattr(acc, "actual_direction", "Neutral")
+                if actual_dir not in ("Bullish", "Bearish"):
+                    continue
+                daily_prob_total += 1
+                if favored == actual_dir:
+                    daily_prob_correct += 1
+
             us30_total = sum(1 for a in acc_list if a.us_open_bias_correct_30 is not None)
             us30_correct = sum(1 for a in acc_list if a.us_open_bias_correct_30)
             us60_total = sum(1 for a in acc_list if a.us_open_bias_correct_60 is not None)
@@ -316,6 +353,8 @@ def render_history():
             session_keys = ["market_open", "asia", "london", "ny_open", "ny_session"]
             session_totals = {k: 0 for k in session_keys}
             session_correct = {k: 0 for k in session_keys}
+            session_prob_totals = {k: 0 for k in session_keys}
+            session_prob_correct = {k: 0 for k in session_keys}
             for item in scored:
                 acc = item["accuracy"]
                 session_map = getattr(acc, "session_accuracy", None) or {}
@@ -328,6 +367,13 @@ def render_history():
                     if bool(ok):
                         session_correct[key] += 1
 
+                    prob_ok = row.get("favorability_correct") if isinstance(row, dict) else None
+                    if prob_ok is None:
+                        continue
+                    session_prob_totals[key] += 1
+                    if bool(prob_ok):
+                        session_prob_correct[key] += 1
+
             c1, c2, c3 = st.columns(3)
             with c1:
                 if daily_total:
@@ -336,11 +382,11 @@ def render_history():
                 else:
                     st.metric("Daily Bias Accuracy", "n/a")
             with c2:
-                if us30_total:
-                    st.metric("US Open 30m Accuracy", f"{us30_correct / us30_total:.0%}")
-                    st.caption(f"{us30_correct} / {us30_total} days")
+                if daily_prob_total:
+                    st.metric("Daily Probability Favorability Accuracy", f"{daily_prob_correct / daily_prob_total:.0%}")
+                    st.caption(f"{daily_prob_correct} / {daily_prob_total} days")
                 else:
-                    st.metric("US Open 30m Accuracy", "n/a")
+                    st.metric("Daily Probability Favorability Accuracy", "n/a")
             with c3:
                 if us60_total:
                     st.metric("US Open 60m Accuracy", f"{us60_correct / us60_total:.0%}")
@@ -348,6 +394,14 @@ def render_history():
                 else:
                     st.metric("US Open 60m Accuracy", "n/a")
             st.caption("US Open accuracy uses direction over the first 30/60 minutes after 09:30 ET.")
+
+            c6, _ = st.columns(2)
+            with c6:
+                if us30_total:
+                    st.metric("US Open 30m Accuracy", f"{us30_correct / us30_total:.0%}")
+                    st.caption(f"{us30_correct} / {us30_total} days")
+                else:
+                    st.metric("US Open 30m Accuracy", "n/a")
 
             c4, c5 = st.columns(2)
             with c4:
@@ -385,6 +439,16 @@ def render_history():
                         "Session": session_name_map[key],
                         "Accuracy": f"{accuracy_pct:.0%}" if accuracy_pct is not None else "n/a",
                         "Correct/Total": f"{correct}/{total}" if total else "0/0",
+                        "Probability Favorability Accuracy": (
+                            f"{(session_prob_correct.get(key, 0) / session_prob_totals.get(key, 1)):.0%}"
+                            if session_prob_totals.get(key, 0)
+                            else "n/a"
+                        ),
+                        "Fav Correct/Total": (
+                            f"{session_prob_correct.get(key, 0)}/{session_prob_totals.get(key, 0)}"
+                            if session_prob_totals.get(key, 0)
+                            else "0/0"
+                        ),
                     }
                 )
             st.dataframe(pd.DataFrame(session_rows), use_container_width=True, hide_index=True)
@@ -734,6 +798,8 @@ def render_history():
         st.write("Previous Day Direction: n/a")
         st.write("Previous Day Direction (ATR-adjusted): n/a")
     st.write(f"Daily Bias: {b.daily_bias} ({b.daily_confidence:.0%})")
+    d_bull, d_bear = bias_probabilities(b.daily_bias, float(b.daily_confidence or 0.0))
+    st.caption(f"Daily Probability: Bullish {d_bull:.0%} | Bearish {d_bear:.0%}")
     daily_status = "Finalized" if getattr(b, "daily_finalized", None) is True else "Not Finalized"
     daily_time = getattr(b, "daily_finalized_at", "10:45 ET")
     st.caption(f"Daily Bias Status: {daily_status} | Finalized Time: {daily_time}")
@@ -746,10 +812,14 @@ def render_history():
     if us60_conf is None:
         us60_conf = b.us_open_confidence
     st.write(f"US Open Bias 30m: {us30} ({us30_conf:.0%})")
+    us30_bull, us30_bear = bias_probabilities(str(us30), float(us30_conf or 0.0))
+    st.caption(f"US Open 30m Probability: Bullish {us30_bull:.0%} | Bearish {us30_bear:.0%}")
     us30_status = "Finalized" if getattr(b, "us_open_finalized_30", None) is True else "Not Finalized"
     us30_time = getattr(b, "us_open_finalized_30_at", "10:00 ET")
     st.caption(f"US Open 30m Status: {us30_status} | Finalized Time: {us30_time}")
     st.write(f"US Open Bias 60m: {us60} ({us60_conf:.0%})")
+    us60_bull, us60_bear = bias_probabilities(str(us60), float(us60_conf or 0.0))
+    st.caption(f"US Open 60m Probability: Bullish {us60_bull:.0%} | Bearish {us60_bear:.0%}")
     us60_status = "Finalized" if getattr(b, "us_open_finalized_60", None) is True else "Not Finalized"
     us60_time = getattr(b, "us_open_finalized_60_at", "10:45 ET")
     st.caption(f"US Open 60m Status: {us60_status} | Finalized Time: {us60_time}")
@@ -873,6 +943,20 @@ def render_history():
         st.write(f"Used Bias: {getattr(a,'used_bias', 'n/a')}")
         st.write(f"US Open Bias Correct (30m): {getattr(a,'us_open_bias_correct_30', 'n/a')}")
         st.write(f"US Open Bias Correct (60m): {getattr(a,'us_open_bias_correct_60', 'n/a')}")
+        dbull, dbear = bias_probabilities(getattr(b, "daily_bias", "Neutral"), float(getattr(b, "daily_confidence", 0.0) or 0.0))
+        if abs(dbull - dbear) < 0.01:
+            daily_favored_side = "Neutral"
+            daily_prob_acc = "n/a"
+        else:
+            daily_favored_side = "Bullish" if dbull > dbear else "Bearish"
+            if a.actual_direction in ("Bullish", "Bearish"):
+                daily_prob_acc = str(daily_favored_side == a.actual_direction)
+            else:
+                daily_prob_acc = "n/a"
+        st.write(
+            f"Daily Probability Favorability: favored {daily_favored_side} "
+            f"({dbull:.0%} bullish / {dbear:.0%} bearish) | Correct: {daily_prob_acc}"
+        )
         if getattr(a, "close_quality", None):
             close_pos = getattr(a, "close_position_pct", None)
             close_text = f"{close_pos:.1f}%" if close_pos is not None else "n/a"
@@ -894,6 +978,11 @@ def render_history():
                     {
                         "Session": label_map[key],
                         "Predicted": row.get("predicted", "n/a"),
+                        "Confidence": f"{float(row.get('confidence', 0.0) or 0.0):.0%}" if row.get("confidence") is not None else "n/a",
+                        "Bull Prob": f"{float(row.get('prob_bullish', 0.0) or 0.0):.0%}" if row.get("prob_bullish") is not None else "n/a",
+                        "Bear Prob": f"{float(row.get('prob_bearish', 0.0) or 0.0):.0%}" if row.get("prob_bearish") is not None else "n/a",
+                        "Favored Side": row.get("favored_side", "n/a"),
+                        "Favorability Correct": row.get("favorability_correct", "n/a"),
                         "Actual": row.get("actual", "n/a"),
                         "Correct": row.get("correct", "n/a"),
                         "Finalized At": row.get("finalized_at", "n/a"),

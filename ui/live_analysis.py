@@ -36,6 +36,7 @@ from indicators.statistics import zscore
 from indicators.volatility import rolling_volatility, atr_like
 from indicators.momentum import roc, trend_strength
 from indicators.volume import rvol
+from engines.probability import bias_probabilities
 from engines.unified_bias import build_unified_bias
 from ui.bias_composite import render_unified_bias_panel
 from storage.history_manager import (
@@ -960,6 +961,8 @@ def main():
         f"Daily Bias: {daily_bias} ({daily_conf:.0%}). "
         f"Meaning for today: directional setups aligned with {str(daily_bias).lower()} have higher odds unless intraday structure invalidates this stance."
     )
+    daily_bull, daily_bear = bias_probabilities(daily_bias, daily_conf)
+    st.caption(f"Probability: Bullish {daily_bull:.0%} | Bearish {daily_bear:.0%}")
     st.caption(_finalization_line(getattr(bias, "daily_finalized", None), getattr(bias, "daily_finalized_at", None)))
     us_30 = getattr(bias, "us_open_bias_30", None) or getattr(bias, "us_open_bias", "n/a")
     us_60 = getattr(bias, "us_open_bias_60", None) or getattr(bias, "us_open_bias", "n/a")
@@ -973,11 +976,15 @@ def main():
         f"US Open Bias 30m: {us_30} ({us_30_conf:.0%}). "
         "Meaning for today: this frames the opening impulse, so early continuation/reversal setups should be judged against this first 30-minute read."
     )
+    us30_bull, us30_bear = bias_probabilities(us_30, us_30_conf)
+    st.caption(f"Probability: Bullish {us30_bull:.0%} | Bearish {us30_bear:.0%}")
     st.caption(_finalization_line(getattr(bias, "us_open_finalized_30", None), getattr(bias, "us_open_finalized_30_at", None)))
     st.write(
         f"US Open Bias 60m: {us_60} ({us_60_conf:.0%}). "
         "Meaning for today: this is the stronger opening confirmation; alignment with it supports holding directional conviction into mid-session."
     )
+    us60_bull, us60_bear = bias_probabilities(us_60, us_60_conf)
+    st.caption(f"Probability: Bullish {us60_bull:.0%} | Bearish {us60_bear:.0%}")
     st.caption(_finalization_line(getattr(bias, "us_open_finalized_60", None), getattr(bias, "us_open_finalized_60_at", None)))
     unified_payload = build_unified_bias(
         df_today=df_today if has_today_data else pd.DataFrame(),

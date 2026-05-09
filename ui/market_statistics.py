@@ -8,6 +8,7 @@ import streamlit as st
 
 from data.data_fetcher import fetch_intraday_ohlcv
 from data.session_reference import get_session_windows_for_date
+from engines.probability import bias_probabilities
 from engines.volume_profile import build_session_profiles, trading_day_bounds
 from indicators.momentum import roc, trend_strength
 from indicators.moving_averages import compute_daily_vwap
@@ -172,6 +173,14 @@ def _direction_evidence_sentence(direction: str, evidence: list) -> str:
     if direction == "Bearish":
         return f"Bearish evidence is led by {lead}, which supports downside continuation if opening structure holds."
     return f"Evidence is mixed ({lead}), which favors rotational behavior until one side gains acceptance."
+
+
+def _favored_probability_side_text(bull_prob: float, bear_prob: float) -> str:
+    if abs(bull_prob - bear_prob) < 0.01:
+        return f"probability was balanced ({bull_prob:.0%} bullish vs {bear_prob:.0%} bearish)"
+    if bull_prob > bear_prob:
+        return f"probability favored bullish ({bull_prob:.0%} bullish vs {bear_prob:.0%} bearish)"
+    return f"probability favored bearish ({bull_prob:.0%} bullish vs {bear_prob:.0%} bearish)"
 
 
 def _render_analysis_card(title: str, body: str) -> None:
@@ -734,6 +743,8 @@ def render_market_statistics_tab() -> None:
     s1, s2 = st.columns(2)
     s1.metric("Session Structure Result", session_result)
     s2.metric("Session Structure Confidence", f"{session_conf:.0%}")
+    s_bull, s_bear = bias_probabilities(session_result, session_conf)
+    st.caption(f"Session Structure Probability: Bullish {s_bull:.0%} | Bearish {s_bear:.0%}")
     if session_result == "Neutral":
         st.caption(f"Session Structure is neutral because {session_reason}.")
 
@@ -776,6 +787,8 @@ def render_market_statistics_tab() -> None:
     p1, p2 = st.columns(2)
     p1.metric("Profile/Context Result", profile_context_result)
     p2.metric("Profile/Context Confidence", f"{profile_context_conf:.0%}")
+    p_bull, p_bear = bias_probabilities(profile_context_result, profile_context_conf)
+    st.caption(f"Profile/Context Probability: Bullish {p_bull:.0%} | Bearish {p_bear:.0%}")
     if profile_context_result == "Neutral":
         st.caption(f"Profile/Context is neutral because {profile_reason}.")
 
@@ -805,6 +818,8 @@ def render_market_statistics_tab() -> None:
     r1, r2 = st.columns(2)
     r1.metric("Regime Result", regime_result)
     r2.metric("Regime Confidence", f"{regime_conf:.0%}")
+    r_bull, r_bear = bias_probabilities(regime_result, regime_conf)
+    st.caption(f"Regime Probability: Bullish {r_bull:.0%} | Bearish {r_bear:.0%}")
     if regime_result == "Neutral":
         st.caption(f"Regime is neutral because {regime_reason}.")
 
@@ -933,6 +948,8 @@ def render_market_statistics_tab() -> None:
     c2.metric("Net Score", f"{net_score:.2f}")
     c3.metric("Confidence", f"{confidence:.0%}")
     c4.metric("Last Update", confluence_updated_label)
+    o_bull, o_bear = bias_probabilities(overall, confidence, net_score)
+    st.caption(f"Overall Probability: Bullish {o_bull:.0%} | Bearish {o_bear:.0%}")
     if overall == "Neutral":
         has_pos = bool((score_df["Score"] > 0).any()) if not score_df.empty else False
         has_neg = bool((score_df["Score"] < 0).any()) if not score_df.empty else False
@@ -991,6 +1008,8 @@ def render_market_statistics_tab() -> None:
         f"Profile/Context, Regime, broader statistics, and finalized summaries on this tab. "
         f"Status: {'Finalized' if daily_bias_finalized else 'Not Finalized'}"
     )
+    d_bull, d_bear = bias_probabilities(daily_bias, daily_bias_conf, daily_bias_weighted)
+    st.caption(f"Daily Probability: Bullish {d_bull:.0%} | Bearish {d_bear:.0%}")
     st.caption(f"Daily bias finalization time: {daily_bias_cutoff:%H:%M} ET")
 
     st.markdown(
@@ -1079,6 +1098,12 @@ def render_market_statistics_tab() -> None:
     ny_open_alignment = _evaluate_alignment(ny_open_hyp_dir, ny_open_actual)
     ny_session_alignment = _evaluate_alignment(ny_session_hyp_dir, ny_actual)
 
+    market_open_bull, market_open_bear = bias_probabilities(market_open_dir, market_open_conf)
+    asia_bull, asia_bear = bias_probabilities(asia_hyp_dir, asia_hyp_conf)
+    london_bull, london_bear = bias_probabilities(london_hyp_dir, london_hyp_conf)
+    ny_open_bull, ny_open_bear = bias_probabilities(ny_open_hyp_dir, ny_open_hyp_conf)
+    ny_session_bull, ny_session_bear = bias_probabilities(ny_session_hyp_dir, ny_session_hyp_conf)
+
     market_open_evidence = [
         f"previous day type {prev_day_type}",
         f"previous close location {prev_close_location}",
@@ -1108,32 +1133,34 @@ def render_market_statistics_tab() -> None:
     market_open_sentence = (
         f"Market Open Plan ({_phase_status_text(mkt_open_plan_final)} by 17:30 ET): using previous-day statistics including day type ({prev_day_type}), "
         f"close location ({prev_close_location}), and prior directional move ({prev_day_move_dir.lower()}), the hypothesis projects a {market_open_dir.lower()} open with "
-        f"{market_open_conf:.0%} confidence, a gap-fill probability of {gap_fill_prob:.0%}, and an expectation that price will "
+        f"{market_open_conf:.0%} confidence and {market_open_bull:.0%}/{market_open_bear:.0%} bull/bear probability, a gap-fill probability of {gap_fill_prob:.0%}, and an expectation that price will "
         f"{'seek continuation away from value' if market_open_dir in ('Bullish', 'Bearish') else 'trade rotationally around value'}; {market_open_alignment} "
         f"{_direction_evidence_sentence(market_open_dir, market_open_evidence)}"
     )
     asia_sentence = (
         f"Asia Session Hypothesis ({_phase_status_text(asia_final)} 15 minutes after Asia open): using previous-day context, market-open plan, overnight trend "
-        f"({overnight_trend:+.4f}), and gap posture ({gap_bias.lower()}), Asia was expected to be {asia_hyp_dir.lower()} with {asia_hyp_conf:.0%} confidence, "
+        f"({overnight_trend:+.4f}), and gap posture ({gap_bias.lower()}), Asia was expected to be {asia_hyp_dir.lower()} with {asia_hyp_conf:.0%} confidence "
+        f"and {asia_bull:.0%}/{asia_bear:.0%} bull/bear probability, "
         f"and the realized Asia outcome was {asia_actual.lower()}; {asia_alignment} "
         f"{_direction_evidence_sentence(asia_hyp_dir, asia_evidence)}"
     )
     london_sentence = (
         f"London Session Hypothesis ({_phase_status_text(london_final)} 15 minutes after London open): using previous-day context, market-open plan, and Asia outcome "
-        f"({asia_actual.lower()}), London was expected to be {london_hyp_dir.lower()} with {london_hyp_conf:.0%} confidence, and the realized London outcome was "
+        f"({asia_actual.lower()}), London was expected to be {london_hyp_dir.lower()} with {london_hyp_conf:.0%} confidence "
+        f"and {london_bull:.0%}/{london_bear:.0%} bull/bear probability, and the realized London outcome was "
         f"{london_actual.lower()}; {london_alignment} "
         f"{_direction_evidence_sentence(london_hyp_dir, london_evidence)}"
     )
     ny_open_sentence = (
         f"NY Open Hypothesis ({_phase_status_text(ny_open_final)} by 09:15 ET): using previous-day, market-open, Asia, and London statistics, NY open was expected "
-        f"to be {ny_open_hyp_dir.lower()} with {ny_open_hyp_conf:.0%} confidence, with immediate behavior biased to "
+        f"to be {ny_open_hyp_dir.lower()} with {ny_open_hyp_conf:.0%} confidence and {ny_open_bull:.0%}/{ny_open_bear:.0%} bull/bear probability, with immediate behavior biased to "
         f"{'continuation' if ny_open_hyp_dir in ('Bullish', 'Bearish') else 'rotation'} at the open and then "
         f"{'follow-through if OR breaks and holds' if ny_open_hyp_dir in ('Bullish', 'Bearish') else 'reversion unless OR expands with volume'} after the 30-minute OR forms; "
         f"{ny_open_alignment} {_direction_evidence_sentence(ny_open_hyp_dir, ny_open_evidence)}"
     )
     ny_session_sentence = (
         f"NY Session Hypothesis ({_phase_status_text(ny_session_final)} by 10:35 ET): after 30-minute and 60-minute OR information, the combined statistics expected "
-        f"a {ny_session_hyp_dir.lower()} NY session with {ny_session_hyp_conf:.0%} confidence, while realized NY session direction was {ny_actual.lower()}; "
+        f"a {ny_session_hyp_dir.lower()} NY session with {ny_session_hyp_conf:.0%} confidence and {ny_session_bull:.0%}/{ny_session_bear:.0%} bull/bear probability, while realized NY session direction was {ny_actual.lower()}; "
         f"{ny_session_alignment} {_direction_evidence_sentence(ny_session_hyp_dir, ny_session_evidence)}"
     )
 
@@ -1162,23 +1189,28 @@ def render_market_statistics_tab() -> None:
 
     market_open_review = (
         f"Market Open Post-Session Review ({_phase_status_text(market_open_done)}): {_session_path_sentence('Market Open (18:00 to Asia-15m)', market_open_df)} "
-        f"The statistics had assumed a {market_open_dir.lower()} path at {market_open_conf:.0%} confidence, and {market_open_alignment.lower()}"
+        f"The statistics had assumed a {market_open_dir.lower()} path at {market_open_conf:.0%} confidence, "
+        f"{_favored_probability_side_text(market_open_bull, market_open_bear)}, and {market_open_alignment.lower()}"
     )
     asia_review = (
         f"Asia Post-Session Review ({_phase_status_text(asia_done)}): {_session_path_sentence('Asia', asia_df)} "
-        f"The statistics had assumed a {asia_hyp_dir.lower()} path at {asia_hyp_conf:.0%} confidence, and {asia_alignment.lower()}"
+        f"The statistics had assumed a {asia_hyp_dir.lower()} path at {asia_hyp_conf:.0%} confidence, "
+        f"{_favored_probability_side_text(asia_bull, asia_bear)}, and {asia_alignment.lower()}"
     )
     london_review = (
         f"London Post-Session Review ({_phase_status_text(london_done)}): {_session_path_sentence('London', london_df)} "
-        f"The statistics had assumed a {london_hyp_dir.lower()} path at {london_hyp_conf:.0%} confidence, and {london_alignment.lower()}"
+        f"The statistics had assumed a {london_hyp_dir.lower()} path at {london_hyp_conf:.0%} confidence, "
+        f"{_favored_probability_side_text(london_bull, london_bear)}, and {london_alignment.lower()}"
     )
     ny_open_review = (
         f"NY Open Post-Session Review ({_phase_status_text(ny_open_done)}): {_session_path_sentence('NY Open (09:30-09:45)', ny_open_df)} "
-        f"The statistics had assumed a {ny_open_hyp_dir.lower()} path at {ny_open_hyp_conf:.0%} confidence, and {ny_open_alignment.lower()}"
+        f"The statistics had assumed a {ny_open_hyp_dir.lower()} path at {ny_open_hyp_conf:.0%} confidence, "
+        f"{_favored_probability_side_text(ny_open_bull, ny_open_bear)}, and {ny_open_alignment.lower()}"
     )
     ny_review = (
         f"NY Session Post-Session Review ({_phase_status_text(ny_done)}): {_session_path_sentence('NY Session', us_df)} "
-        f"The statistics had assumed a {ny_session_hyp_dir.lower()} path at {ny_session_hyp_conf:.0%} confidence, and {ny_session_alignment.lower()} "
+        f"The statistics had assumed a {ny_session_hyp_dir.lower()} path at {ny_session_hyp_conf:.0%} confidence, "
+        f"{_favored_probability_side_text(ny_session_bull, ny_session_bear)}, and {ny_session_alignment.lower()} "
         f"Stat drivers were momentum ({momentum_regime}), profile location ({profile_bias}), and opening-drive carry ({opening_drive_bias})."
     )
 

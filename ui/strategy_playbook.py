@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from data.data_fetcher import fetch_intraday_ohlcv
+from engines.probability import bias_probabilities
 from engines.patterns import detect_patterns
 from engines.sessions import compute_session_stats
 from engines.strategy_playbook import build_strategy_playbook
@@ -1551,6 +1552,11 @@ def render_strategy_playbook() -> None:
     c2.metric("NY Mode", f"{decision.get('ny_mode', 'n/a')}")
     c3.metric("NY Direction", f"{decision.get('ny_direction', 'Neutral')}")
     c4.metric("Confidence", f"{100.0 * float(decision.get('confidence', 0.0)):.0f}%")
+    ny_prob_bull, ny_prob_bear = bias_probabilities(
+        str(decision.get("ny_direction", "Neutral")),
+        float(decision.get("confidence", 0.0) or 0.0),
+    )
+    st.caption(f"NY Direction Probability: Bullish {ny_prob_bull:.0%} | Bearish {ny_prob_bear:.0%}")
 
     unified_payload = build_unified_bias(
         df_today=df_trading_day if has_today else pd.DataFrame(),
