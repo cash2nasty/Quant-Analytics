@@ -152,6 +152,11 @@ def render_unified_bias_panel(
         st.caption(f"Daily Probability: Bullish {d_bull:.0%} | Bearish {d_bear:.0%}")
         d_status = "Finalized" if bool(daily.get("finalized", False)) else "Not Finalized"
         st.caption(f"Daily Status: {d_status} | Finalized At: {daily.get('finalized_at', '10:45 ET')}")
+        if daily.get("close_threshold_desc") is not None and daily.get("close_position_pct") is not None:
+            st.caption(
+                f"Daily Threshold-Close Context: {daily.get('close_threshold_desc')} "
+                f"at {float(daily.get('close_position_pct', 0.0)):.1f}% of range."
+            )
         st.write(f"Daily Expected Behavior: {daily.get('expected', 'n/a')}")
         st.write(f"Daily Deep Reasoning: {daily.get('reasoning', 'n/a')}")
 

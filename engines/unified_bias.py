@@ -157,6 +157,22 @@ def _expected_behavior(bias: str, horizon: str) -> str:
     )
 
 
+def _threshold_close_description(position_pct: float) -> str:
+    if position_pct <= 10:
+        return "capitulative close (very weak threshold finish)"
+    if position_pct <= 30:
+        return "defensive close (weak threshold finish)"
+    if position_pct <= 45:
+        return "fading close (slightly weak threshold finish)"
+    if position_pct <= 55:
+        return "balanced close (normal threshold finish)"
+    if position_pct <= 70:
+        return "constructive close (normal-positive threshold finish)"
+    if position_pct <= 90:
+        return "initiative close (strong threshold finish)"
+    return "dominant close (very strong threshold finish)"
+
+
 def build_unified_bias(
     df_today: Optional[pd.DataFrame],
     df_prev: Optional[pd.DataFrame],
@@ -279,6 +295,8 @@ def build_unified_bias(
 
     daily_blend = _blend(daily_components)
     ny_open_blend = _blend(ny_open_components)
+    close_pos_pct = ((float(day_df["close"].iloc[-1]) - float(day_df["low"].min())) / max(float(day_df["high"].max() - day_df["low"].min()), 1e-6)) * 100.0
+    close_threshold_desc = _threshold_close_description(close_pos_pct)
     daily_bull, daily_bear = bias_probabilities(
         str(daily_blend.get("bias", "Neutral")),
         float(daily_blend.get("confidence", 0.0) or 0.0),
@@ -316,6 +334,8 @@ def build_unified_bias(
             "reasoning": daily_reasoning,
             "prob_bullish": daily_bull,
             "prob_bearish": daily_bear,
+            "close_threshold_desc": close_threshold_desc,
+            "close_position_pct": close_pos_pct,
             "finalized": daily_finalized,
             "finalized_at": "10:45 ET",
         },

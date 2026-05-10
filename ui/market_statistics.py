@@ -304,6 +304,83 @@ def _gap_fill_probability(gap_atr_ratio: float, vol_regime: str, ny_open_relatio
     return _clamp(prob, 0.05, 0.95)
 
 
+def _gap_size_label(gap_atr_ratio: float) -> str:
+    if gap_atr_ratio < 0.20:
+        return "micro gap"
+    if gap_atr_ratio < 0.45:
+        return "small gap"
+    if gap_atr_ratio < 0.85:
+        return "moderate gap"
+    if gap_atr_ratio < 1.30:
+        return "large gap"
+    return "extreme gap"
+
+
+def _gap_creation_probability(
+    overnight_range: float,
+    atr_last: float,
+    compression_expansion_ratio: float,
+    vol_regime: str,
+) -> float:
+    atr_safe = max(atr_last, 1e-6)
+    overnight_atr = overnight_range / atr_safe
+    score = 0.48
+    score += 0.08 if overnight_atr >= 0.55 else -0.04
+    score += 0.06 if compression_expansion_ratio >= 1.10 else -0.03
+    if vol_regime == "expanded":
+        score += 0.06
+    elif vol_regime == "compressed":
+        score -= 0.04
+    return _clamp(score, 0.05, 0.95)
+
+
+def _gap_direction_projection(
+    gap_bias: str,
+    overnight_trend: float,
+    momentum_bias: str,
+    profile_bias: str,
+) -> Tuple[str, float, float, float]:
+    components = [
+        (gap_bias, 0.52),
+        (_label_from_value(overnight_trend, threshold=0.0), 0.20),
+        (momentum_bias, 0.18),
+        (profile_bias, 0.10),
+    ]
+    direction, confidence, weighted = _combine_directional_components(components)
+    bull_prob, bear_prob = bias_probabilities(direction, confidence, weighted)
+    return direction, confidence, bull_prob, bear_prob
+
+
+def _gap_behavior_expectation(
+    gap_size_label: str,
+    gap_fill_prob: float,
+    projected_dir: str,
+) -> str:
+    if gap_fill_prob >= 0.62 and gap_size_label in {"micro gap", "small gap"}:
+        return "higher odds of early fill or partial fill before directional resolve"
+    if gap_fill_prob <= 0.38 and gap_size_label in {"large gap", "extreme gap"}:
+        return "higher odds of continuation with only shallow retracement attempts"
+    if projected_dir in ("Bullish", "Bearish"):
+        return "two-way opening auction first, then directional continuation if opening acceptance confirms"
+    return "rotational open around value with delayed directional conviction"
+
+
+def _threshold_close_description(position_pct: float) -> str:
+    if position_pct <= 10:
+        return "capitulative close (very weak threshold finish)"
+    if position_pct <= 30:
+        return "defensive close (weak threshold finish)"
+    if position_pct <= 45:
+        return "fading close (slightly weak threshold finish)"
+    if position_pct <= 55:
+        return "balanced close (normal threshold finish)"
+    if position_pct <= 70:
+        return "constructive close (normal-positive threshold finish)"
+    if position_pct <= 90:
+        return "initiative close (strong threshold finish)"
+    return "dominant close (very strong threshold finish)"
+
+
 def _format_distance(value_points: float, unit: str, tick_size: float) -> str:
     if not np.isfinite(value_points):
         return "n/a"
@@ -1006,7 +1083,7 @@ def render_market_statistics_tab() -> None:
     st.write(
         f"Daily bias is {daily_bias.lower()} with {daily_bias_conf:.0%} confidence, combined from High-Impact Confluence, Session Structure, "
         f"Profile/Context, Regime, broader statistics, and finalized summaries on this tab. "
-        f"Status: {'Finalized' if daily_bias_finalized else 'Not Finalized'}"
+        f"Status: {'Finalized' if daily_bias_finalized else 'Not Finalized'}."
     )
     d_bull, d_bear = bias_probabilities(daily_bias, daily_bias_conf, daily_bias_weighted)
     st.caption(f"Daily Probability: Bullish {d_bull:.0%} | Bearish {d_bear:.0%}")
@@ -1109,6 +1186,31 @@ def render_market_statistics_tab() -> None:
         f"previous close location {prev_close_location}",
         f"gap context {gap_bias.lower()}",
     ]
+
+    gap_create_prob = _gap_creation_probability(
+        overnight_range=overnight_range,
+        atr_last=atr_last,
+        compression_expansion_ratio=compression_expansion_ratio,
+        vol_regime=vol_regime,
+    )
+    gap_create_conf = _clamp(0.42 + 0.50 * abs(gap_create_prob - 0.50), 0.35, 0.90)
+    gap_size_desc = _gap_size_label(gap_atr_ratio)
+    gap_dir, gap_dir_conf, gap_dir_bull, gap_dir_bear = _gap_direction_projection(
+        gap_bias=gap_bias,
+        overnight_trend=overnight_trend,
+        momentum_bias=momentum_bias,
+        profile_bias=profile_bias,
+    )
+    gap_behavior = _gap_behavior_expectation(gap_size_desc, gap_fill_prob, gap_dir)
+    if gap_create_prob >= 0.55:
+        gap_path_sentence = (
+            f"If a gap forms, probable next directional path favors {gap_dir.lower()} "
+            f"({gap_dir_conf:.0%} confidence; {gap_dir_bull:.0%}/{gap_dir_bear:.0%} bull/bear probability)."
+        )
+    else:
+        gap_path_sentence = (
+            "If a gap forms, directional path remains tentative because gap-creation probability is below the high-confidence threshold."
+        )
     asia_evidence = [
         f"overnight trend {overnight_trend:+.4f}",
         f"market-open hypothesis {market_open_dir.lower()}",
@@ -1133,8 +1235,11 @@ def render_market_statistics_tab() -> None:
     market_open_sentence = (
         f"Market Open Plan ({_phase_status_text(mkt_open_plan_final)} by 17:30 ET): using previous-day statistics including day type ({prev_day_type}), "
         f"close location ({prev_close_location}), and prior directional move ({prev_day_move_dir.lower()}), the hypothesis projects a {market_open_dir.lower()} open with "
-        f"{market_open_conf:.0%} confidence and {market_open_bull:.0%}/{market_open_bear:.0%} bull/bear probability, a gap-fill probability of {gap_fill_prob:.0%}, and an expectation that price will "
-        f"{'seek continuation away from value' if market_open_dir in ('Bullish', 'Bearish') else 'trade rotationally around value'}; {market_open_alignment} "
+        f"{market_open_conf:.0%} confidence and {market_open_bull:.0%}/{market_open_bear:.0%} bull/bear probability. "
+        f"Gap creation model: {gap_create_conf:.0%} confidence and {gap_create_prob:.0%} probability of a meaningful open gap, "
+        f"with current expected gap size class '{gap_size_desc}' ({gap_atr_ratio:.2f} ATR) and gap-fill probability {gap_fill_prob:.0%}. "
+        f"Behavior expectation: {gap_behavior}. {gap_path_sentence} "
+        f"Primary opening expectation remains to {'seek continuation away from value' if market_open_dir in ('Bullish', 'Bearish') else 'trade rotationally around value'}; {market_open_alignment} "
         f"{_direction_evidence_sentence(market_open_dir, market_open_evidence)}"
     )
     asia_sentence = (
@@ -1191,6 +1296,21 @@ def render_market_statistics_tab() -> None:
         f"Market Open Post-Session Review ({_phase_status_text(market_open_done)}): {_session_path_sentence('Market Open (18:00 to Asia-15m)', market_open_df)} "
         f"The statistics had assumed a {market_open_dir.lower()} path at {market_open_conf:.0%} confidence, "
         f"{_favored_probability_side_text(market_open_bull, market_open_bear)}, and {market_open_alignment.lower()}"
+    )
+    predicted_gap_created = gap_create_prob >= 0.55
+    actual_gap_created = gap_atr_ratio >= 0.20
+    gap_creation_correct = predicted_gap_created == actual_gap_created
+    actual_gap_dir = "Bullish" if gap_size > 0 else "Bearish" if gap_size < 0 else "Neutral"
+    if actual_gap_created and gap_dir in ("Bullish", "Bearish") and actual_gap_dir in ("Bullish", "Bearish"):
+        gap_direction_correct = gap_dir == actual_gap_dir
+        gap_direction_text = f"direction accuracy {gap_direction_correct}"
+    else:
+        gap_direction_text = "direction accuracy n/a"
+    market_open_review = (
+        f"{market_open_review} Gap model post-session check: predicted meaningful gap="
+        f"{predicted_gap_created} ({gap_create_prob:.0%} probability, {gap_create_conf:.0%} confidence), "
+        f"realized meaningful gap={actual_gap_created} ({gap_size_desc}, {gap_atr_ratio:.2f} ATR), "
+        f"creation accuracy {gap_creation_correct}, {gap_direction_text}."
     )
     asia_review = (
         f"Asia Post-Session Review ({_phase_status_text(asia_done)}): {_session_path_sentence('Asia', asia_df)} "
