@@ -8,12 +8,14 @@ from ui.definitions_explanations import render_definitions_explanations
 from ui.strategy_playbook import render_strategy_playbook
 from ui.volume_profile import render_volume_profile_tab
 from ui.market_statistics import render_market_statistics_tab
+from ui.trade_modelization import render_trade_modelization_tab
 
 
 APP_TITLE = "NQ Quant Terminal"
 PAGES = [
     "Live Analysis",
     "Strategy Playbook",
+    "Trade Modelization",
     "Market Statistics",
     "Volume Profile",
     "History",
@@ -74,6 +76,8 @@ def main():
         render_live_analysis()
     elif page == "Strategy Playbook":
         render_strategy_playbook()
+    elif page == "Trade Modelization":
+        render_trade_modelization_tab()
     elif page == "Market Statistics":
         render_market_statistics_tab()
     elif page == "Volume Profile":
