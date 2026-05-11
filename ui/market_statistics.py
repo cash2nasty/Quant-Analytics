@@ -518,7 +518,12 @@ def render_market_statistics_tab() -> None:
         tick_size = st.number_input("Tick size", min_value=0.01, value=0.25, step=0.01, key="ms_tick_size")
         value_area = st.slider("Value area %", min_value=0.60, max_value=0.90, value=0.70, step=0.01, key="ms_value_area")
         distance_unit = st.selectbox("Distance Unit", options=["points", "ticks"], index=0, key="ms_distance_unit")
-        auto_refresh = st.checkbox("Auto-refresh", value=True, key="ms_auto_refresh")
+        auto_refresh = st.checkbox(
+            "Auto-refresh",
+            value=False,
+            key="ms_auto_refresh",
+            help="Enable if you want periodic updates. Auto-refresh can reset page position while reviewing long sections.",
+        )
         refresh_seconds = st.selectbox("Refresh every", options=[30, 60, 300], index=1, key="ms_refresh_seconds")
 
     if auto_refresh:
@@ -543,9 +548,10 @@ def render_market_statistics_tab() -> None:
                 st.rerun()
 
     prev_date = _prev_trading_day(selected_date)
+    td_start, td_end = trading_day_bounds(selected_date)
     inherited_key = f"ms_inherited_outlook::{selected_date.isoformat()}"
     inherited_outlook = st.session_state.get(inherited_key)
-    res_today = fetch_intraday_ohlcv(symbol, selected_date)
+    res_today = fetch_intraday_ohlcv(symbol, (td_start.date(), td_end.date()))
     res_prev = fetch_intraday_ohlcv(symbol, prev_date)
 
     df_today = _prepare_df(res_today[0] if isinstance(res_today, tuple) else res_today)
@@ -555,7 +561,6 @@ def render_market_statistics_tab() -> None:
         st.warning("No intraday data available for selected inputs.")
         return
 
-    td_start, td_end = trading_day_bounds(selected_date)
     combined = pd.concat([df_prev, df_today], ignore_index=True) if not df_prev.empty else df_today.copy()
     combined = combined.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp")
     day_df = combined[(combined["timestamp"] >= td_start) & (combined["timestamp"] <= td_end)].copy()
@@ -879,7 +884,7 @@ def render_market_statistics_tab() -> None:
         {"Regime": "Mean Reversion", "State": mean_reversion_regime},
         {"Regime": "Momentum", "State": momentum_regime},
     ]
-    st.dataframe(pd.DataFrame(regime_rows), use_container_width=True)
+    st.table(pd.DataFrame(regime_rows))
     regime_votes = [trend_regime, momentum_regime]
     regime_result, regime_conf_raw = _vote_direction(regime_votes)
     regime_conf = _clamp(0.45 + 0.45 * regime_conf_raw, 0.35, 0.90)
